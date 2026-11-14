@@ -1,0 +1,310 @@
+import { createHmac } from "node:crypto";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+const { dbMock, queryMock, queryState } = vi.hoisted(() => {
+	const state = {
+		rows: [] as unknown[],
+		whereArg: undefined as unknown,
+		orderByArgs: [] as unknown[],
+		updateRows: undefined as unknown[] | undefined,
+		updateWhere: undefined as unknown,
+		insertValues: undefined as unknown,
+	};
+	const query = {
+		from: vi.fn(() => query),
+		where: vi.fn((arg: unknown) => {
+			state.whereArg = arg;
+			return query;
+		}),
+		orderBy: vi.fn((...args: unknown[]) => {
+			state.orderByArgs = args;
+			return query;
+		}),
+		limit: vi.fn(async () => state.rows),
+		for: vi.fn(async () => state.rows),
+	};
+	const update = {
+		set: vi.fn(() => update),
+		where: vi.fn((arg: unknown) => {
+			state.updateWhere = arg;
+			return update;
+		}),
+		returning: vi.fn(async () => state.updateRows ?? state.rows),
+	};
+
+	const db = {
+		select: vi.fn(() => query),
+		insert: vi.fn(() => ({
+			values: vi.fn((values: unknown) => {
+				state.insertValues = values;
+				return { returning: vi.fn(async () => state.updateRows ?? state.rows) };
+			}),
+		})),
+		update: vi.fn(() => update),
+		transaction: vi.fn(async (run: (tx: unknown) => Promise<unknown>) => run(db)),
+	};
+	return {
+		dbMock: db,
+		queryMock: query,
+		queryState: state,
+	};
+});
+
+vi.mock("@universal-resume/db/client", () => ({ db: dbMock }));
+vi.mock("@universal-resume/db/schema", () => ({
+	user: { id: "user.id" },
+	careerSchedule: { id: "schedule.id", userId: "schedule.user_id", aiProviderId: "schedule.ai_provider_id" },
+	careerJob: { userId: "job.user_id", scheduleId: "job.schedule_id", status: "job.status" },
+	aiProvider: {
+		id: "ai_provider.id",
+		userId: "ai_provider.user_id",
+		label: "ai_provider.label",
+		provider: "ai_provider.provider",
+		model: "ai_provider.model",
+		fastModel: "ai_provider.fast_model",
+		capableModel: "ai_provider.capable_model",
+		baseUrl: "ai_provider.base_url",
+		encryptedApiKey: "ai_provider.encrypted_api_key",
+		apiKeySalt: "ai_provider.api_key_salt",
+		apiKeyHash: "ai_provider.api_key_hash",
+		apiKeyPreview: "ai_provider.api_key_preview",
+		testStatus: "ai_provider.test_status",
+		testError: "ai_provider.test_error",
+		lastTestedAt: "ai_provider.last_tested_at",
+		lastUsedAt: "ai_provider.last_used_at",
+		enabled: "ai_provider.enabled",
+		isDefault: "ai_provider.is_default",
+		createdAt: "ai_provider.created_at",
+		updatedAt: "ai_provider.updated_at",
+	},
+}));
+vi.mock("drizzle-orm", () => ({
+	and: (...conditions: unknown[]) => ({ type: "and", conditions }),
+	asc: (value: unknown) => ({ type: "asc", value }),
+	desc: (value: unknown) => ({ type: "desc", value }),
+	eq: (left: unknown, right: unknown) => ({ type: "eq", left, right }),
+	inArray: (left: unknown, right: unknown) => ({ type: "inArray", left, right }),
+	isNull: (value: unknown) => ({ type: "isNull", value }),
+	ne: (left: unknown, right: unknown) => ({ type: "ne", left, right }),
+	sql: (strings: TemplateStringsArray, ...values: unknown[]) => ({ type: "sql", strings: [...strings], values }),
+}));
+vi.mock("@universal-resume/env/server", () => ({ env: { AUTH_SECRET: "synthetic-test-auth-secret" } }));
+vi.mock("../ai/credentials", () => ({
+	assertCredentialEncryptionConfigured: vi.fn(),
+	decryptCredential: vi.fn(() => "decrypted-key"),
+	encryptCredential: vi.fn(),
+}));
+vi.mock("../ai/service", () => ({ testConnection: vi.fn() }));
+vi.mock("../ai/url-policy", () => ({ resolveAiBaseUrl: vi.fn() }));
+
+const { aiProvidersService } = await import("./service");
+const { resolveAiBaseUrl } = await import("../ai/url-policy");
+const { testConnection } = await import("../ai/service");
+
+function providerRow(overrides: Record<string, unknown> = {}) {
+	return {
+		id: "provider-1",
+		userId: "user-1",
+		label: "OpenAI",
+		provider: "openai",
+		model: "gpt-5-mini",
+		fastModel: null,
+		capableModel: null,
+		baseUrl: null,
+		encryptedApiKey: "encrypted-key",
+		apiKeySalt: "salt",
+		apiKeyHash: "hash",
+		apiKeyPreview: "preview",
+		testStatus: "success",
+		testError: null,
+		lastTestedAt: new Date("2026-07-01T00:00:00Z"),
+		lastUsedAt: new Date("2026-07-07T00:00:00Z"),
+		enabled: true,
+		isDefault: false,
+		createdAt: new Date("2026-07-01T00:00:00Z"),
+		updatedAt: new Date("2026-07-01T00:00:00Z"),
+		...overrides,
+	};
+}
+
+describe("aiProvidersService", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		queryState.rows = [];
+		queryState.whereArg = undefined;
+		queryState.orderByArgs = [];
+		queryState.updateRows = undefined;
+		queryState.updateWhere = undefined;
+		queryState.insertValues = undefined;
+	});
+
+	it("prefers the default enabled and tested provider, then stable creation order", async () => {
+		queryState.rows = [providerRow({ id: "first-created" })];
+
+		await expect(aiProvidersService.getDefaultRunnable({ userId: "user-1" })).resolves.toMatchObject({
+			id: "first-created",
+			apiKey: "decrypted-key",
+		});
+
+		expect(queryState.whereArg).toEqual({
+			type: "and",
+			conditions: [
+				{ type: "eq", left: "ai_provider.user_id", right: "user-1" },
+				{ type: "eq", left: "ai_provider.enabled", right: true },
+				{ type: "eq", left: "ai_provider.test_status", right: "success" },
+				{ type: "ne", left: "ai_provider.id", right: "server-ai:user-1" },
+			],
+		});
+		expect(queryState.orderByArgs).toEqual([
+			{ type: "desc", value: "ai_provider.is_default" },
+			{ type: "asc", value: "ai_provider.created_at" },
+			{ type: "asc", value: "ai_provider.id" },
+		]);
+		expect(queryMock.limit).toHaveBeenCalledWith(1);
+	});
+
+	it("sends a saved key only to the host it was saved for", async () => {
+		queryState.rows = [providerRow()];
+		vi.mocked(resolveAiBaseUrl).mockReturnValue("https://other.example/v1");
+		const owner = { id: "provider-1", userId: "user-1" };
+
+		for (const change of [{ baseURL: "https://other.example/v1" }, { provider: "anthropic" as const }])
+			await expect(aiProvidersService.update({ ...owner, ...change })).rejects.toMatchObject({
+				code: "BAD_REQUEST",
+				message: "Enter the API key again to change the provider or base URL.",
+			});
+		expect(dbMock.update).not.toHaveBeenCalled();
+
+		await expect(
+			aiProvidersService.update({ ...owner, baseURL: "https://other.example/v1", apiKey: "new-key" }),
+		).resolves.toMatchObject({ id: "provider-1" });
+	});
+
+	it("accepts an empty key only for a provider that can run without one", async () => {
+		const update = { id: "provider-1", userId: "user-1", baseURL: "https://other.example/v1", apiKey: "" };
+		vi.mocked(resolveAiBaseUrl).mockReturnValue("https://other.example/v1");
+
+		queryState.rows = [providerRow()];
+		await expect(aiProvidersService.update(update)).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: "Enter an API key for this provider.",
+		});
+
+		queryState.rows = [providerRow({ provider: "openai-compatible" })];
+		await expect(aiProvidersService.update(update)).resolves.toMatchObject({ id: "provider-1" });
+	});
+
+	it("rejects an update if the destination or credential changed after the ownership read", async () => {
+		queryState.rows = [providerRow()];
+		queryState.updateRows = [];
+		await expect(
+			aiProvidersService.update({ id: "provider-1", userId: "user-1", apiKey: "new-key" }),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		expect(queryState.updateWhere).toMatchObject({
+			conditions: expect.arrayContaining([
+				{ type: "eq", left: "ai_provider.provider", right: "openai" },
+				{ type: "isNull", value: "ai_provider.base_url" },
+				{ type: "eq", left: "ai_provider.encrypted_api_key", right: "encrypted-key" },
+			]),
+		});
+	});
+	it("keeps the main model for every task until a task model is saved", async () => {
+		queryState.rows = [providerRow()];
+		await expect(aiProvidersService.getDefaultRunnable({ userId: "user-1" })).resolves.toMatchObject({
+			model: "gpt-5-mini",
+			fastModel: null,
+			capableModel: null,
+		});
+	});
+
+	it("stores optional task models on create", async () => {
+		queryState.updateRows = [providerRow({ fastModel: "fast-model", capableModel: "capable-model" })];
+
+		await expect(
+			aiProvidersService.create({
+				userId: "user-1",
+				label: "OpenAI",
+				provider: "openai",
+				model: "gpt-5-mini",
+				fastModel: "fast-model",
+				capableModel: "capable-model",
+				apiKey: "key",
+			}),
+		).resolves.toMatchObject({ fastModel: "fast-model", capableModel: "capable-model" });
+		expect(queryState.insertValues).toMatchObject({ fastModel: "fast-model", capableModel: "capable-model" });
+	});
+
+	it("resets readiness when an optional task model changes", async () => {
+		queryState.rows = [providerRow()];
+		queryState.updateRows = [providerRow({ fastModel: "fast-model", testStatus: "untested", enabled: false })];
+
+		await aiProvidersService.update({ id: "provider-1", userId: "user-1", fastModel: "fast-model" });
+
+		expect(dbMock.update().set).toHaveBeenCalledWith(
+			expect.objectContaining({
+				fastModel: "fast-model",
+				enabled: false,
+				testStatus: "untested",
+			}),
+		);
+	});
+
+	it("binds recipient version to owner, provider, model, full URL and encrypted credential revision", async () => {
+		queryState.rows = [providerRow()];
+		const original = await aiProvidersService.getDefaultRunnable({ userId: "user-1" });
+		expect(original?.recipientVersion).toMatch(/^[a-f0-9]{64}$/);
+		// Existing single-model connections keep the approval version they had before task models existed.
+		expect(original?.recipientVersion).toBe(
+			createHmac("sha256", "synthetic-test-auth-secret")
+				.update(
+					JSON.stringify(["ai-recipient-v1", "user-1", "provider-1", "openai", "gpt-5-mini", null, "encrypted-key"]),
+				)
+				.digest("hex"),
+		);
+		for (const change of [
+			{ id: "other" },
+			{ userId: "other" },
+			{ provider: "anthropic" },
+			{ model: "other" },
+			{ fastModel: "other-fast" },
+			{ capableModel: "other-capable" },
+			{ baseUrl: "https://other.example/v1" },
+			{ encryptedApiKey: "replacement" },
+		]) {
+			queryState.rows = [providerRow(change)];
+			expect((await aiProvidersService.getDefaultRunnable({ userId: "user-1" }))?.recipientVersion).not.toBe(
+				original?.recipientVersion,
+			);
+		}
+	});
+
+	it("leaves the saved state alone when the caller abandons a test", async () => {
+		queryState.rows = [providerRow()];
+		const controller = new AbortController();
+		vi.mocked(testConnection).mockImplementation(async () => {
+			controller.abort();
+			return { ok: false, message: "This operation was aborted", kind: "unknown" };
+		});
+		await expect(
+			aiProvidersService.test({ id: "provider-1", userId: "user-1", signal: controller.signal }),
+		).rejects.toThrow();
+		expect(dbMock.update().set).not.toHaveBeenCalledWith(expect.objectContaining({ testStatus: "failure" }));
+	});
+
+	it("records a failure the provider reported while the caller is still waiting", async () => {
+		queryState.rows = [providerRow()];
+		vi.mocked(testConnection).mockResolvedValue({ ok: false, message: "Invalid API key", kind: "unknown" });
+		await aiProvidersService.test({ id: "provider-1", userId: "user-1", signal: new AbortController().signal });
+		expect(dbMock.update().set).toHaveBeenCalledWith(
+			expect.objectContaining({ enabled: false, testStatus: "failure", testError: "Invalid API key" }),
+		);
+	});
+});
+
+it("keeps a deliberately switched-off provider off after a passing health check", async () => {
+	queryState.rows = [providerRow({ enabled: false, userDisabled: true })];
+	queryState.updateRows = undefined;
+	vi.mocked(testConnection).mockResolvedValue({ ok: true });
+	await aiProvidersService.test({ id: "provider-1", userId: "user-1" });
+	expect(dbMock.update().set).toHaveBeenCalledWith(expect.objectContaining({ enabled: false, testStatus: "success" }));
+});

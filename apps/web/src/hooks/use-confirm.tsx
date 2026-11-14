@@ -1,0 +1,173 @@
+import { t } from "@lingui/core/macro";
+import * as React from "react";
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+} from "@universal-resume/ui/components/alert-dialog";
+import { Icon } from "@universal-resume/ui/components/icon";
+import { Input } from "@universal-resume/ui/components/input";
+import { cn } from "@universal-resume/utils/style";
+import { isImeComposing } from "@/libs/keyboard";
+
+type AskOptions = {
+	description?: React.ReactNode;
+	confirmText?: string;
+	variant?: "primary" | "secondary" | "danger";
+	cancelText?: string;
+	/** Prompts only: the text the field starts with. */
+	defaultValue?: string;
+	maxLength?: number;
+	/** An aborted request dismisses its pending confirmation. */
+	signal?: AbortSignal;
+	/** @deprecated Ignored. A permanent delete asks once with a plain danger button (`variant: "danger"`). */
+	hold?: boolean;
+};
+
+type AskState = AskOptions & {
+	open: boolean;
+	title: string;
+	/** A prompt asks for text; a confirmation only for yes or no. */
+	withInput: boolean;
+	resolve: ((value: string | null) => void) | null;
+};
+
+type Ask = (title: string, options: AskOptions | undefined, withInput: boolean) => Promise<string | null>;
+
+let requestConfirm: Ask | null = null;
+
+/** Non-React request code uses the same accessible confirmation dialog as task controls. */
+export async function confirmOperation(title: string, options: AskOptions) {
+	return requestConfirm ? (await requestConfirm(title, options, false)) !== null : false;
+}
+
+const AskContext = React.createContext<Ask | null>(null);
+
+/** One dialog answers both `useConfirm` and `usePrompt`: a question, and a text field when it's a prompt. */
+export function ConfirmDialogProvider({ children }: { children: React.ReactNode }) {
+	const [state, setState] = React.useState<AskState>({ open: false, title: "", withInput: false, resolve: null });
+	const [value, setValue] = React.useState("");
+
+	const pending = React.useRef<((value: string | null) => void) | null>(null);
+	const ask: Ask = (title, options, withInput) =>
+		new Promise((resolve) => {
+			pending.current?.(null);
+			const finish = (value: string | null) => {
+				options?.signal?.removeEventListener("abort", cancel);
+				if (pending.current === finish) pending.current = null;
+				resolve(value);
+			};
+			const cancel = () => {
+				finish(null);
+				setState((previous) => (previous.resolve === finish ? { ...previous, open: false, resolve: null } : previous));
+			};
+			if (options?.signal?.aborted) {
+				resolve(null);
+				return;
+			}
+			pending.current = finish;
+			options?.signal?.addEventListener("abort", cancel, { once: true });
+			setValue(options?.defaultValue ?? "");
+			setState({ ...options, open: true, title, withInput, resolve: finish });
+		});
+
+	React.useEffect(() => {
+		requestConfirm = ask;
+		return () => {
+			requestConfirm = null;
+		};
+	});
+
+	// Cancelling answers null; confirming answers the text (empty for a confirmation). The state stays while closing.
+	const answer = (result: string | null) => {
+		state.resolve?.(result);
+		setState((previous) => ({ ...previous, open: false, resolve: null }));
+	};
+
+	return (
+		<AskContext.Provider value={ask}>
+			{children}
+
+			<AlertDialog open={state.open} onOpenChange={(open) => !open && answer(null)}>
+				<AlertDialogContent>
+					<AlertDialogHeader>
+						<AlertDialogTitle className="pe-8">{state.title}</AlertDialogTitle>
+						{!state.withInput && (
+							<AlertDialogDescription render={<div />} className={cn(!state.description && "sr-only")}>
+								{state.description}
+							</AlertDialogDescription>
+						)}
+					</AlertDialogHeader>
+
+					{state.withInput && (
+						<Input
+							value={value}
+							maxLength={state.maxLength}
+							aria-label={state.title}
+							// A prompt opens with its text selected: typing replaces the name.
+							onFocus={(event) => event.currentTarget.select()}
+							onChange={(event) => setValue(event.target.value)}
+							onKeyDown={(event) => {
+								if (isImeComposing(event)) return;
+								if (event.key === "Enter") answer(value);
+							}}
+						/>
+					)}
+
+					{state.withInput && (
+						<AlertDialogDescription className={cn("t-caption text-ink-3", !state.description && "sr-only")}>
+							{state.description}
+						</AlertDialogDescription>
+					)}
+
+					<AlertDialogFooter>
+						<AlertDialogCancel variant="ghost" onClick={() => answer(null)}>
+							{state.cancelText ?? t`Cancel`}
+						</AlertDialogCancel>
+						<AlertDialogAction
+							variant={state.hold ? "danger" : (state.variant ?? (state.withInput ? "secondary" : "primary"))}
+							onClick={() => answer(state.withInput ? value : "")}
+						>
+							{state.confirmText ?? t`Confirm`}
+						</AlertDialogAction>
+					</AlertDialogFooter>
+
+					{/* calm: request to lead: AlertDialogContent has no close button; this is DialogContent's, by hand. */}
+					<AlertDialogCancel
+						variant="ghost"
+						size="icon"
+						aria-label={t`Close`}
+						className="absolute inset-e-[calc(var(--dialog-pad)-8px)] top-[calc(var(--dialog-pad)-4px)]"
+						onClick={() => answer(null)}
+					>
+						<Icon name="x" />
+					</AlertDialogCancel>
+				</AlertDialogContent>
+			</AlertDialog>
+		</AskContext.Provider>
+	);
+}
+
+function useAsk() {
+	const ask = React.use(AskContext);
+	if (!ask) throw new Error("useConfirm and usePrompt must be used within a <ConfirmDialogProvider />.");
+	return ask;
+}
+
+/** Resolves true when the user confirms. */
+export function useConfirm() {
+	const ask = useAsk();
+	return async (title: string, options?: Omit<AskOptions, "defaultValue">) =>
+		(await ask(title, options, false)) !== null;
+}
+
+/** Resolves with the text entered, or null when the user cancels. */
+export function usePrompt() {
+	const ask = useAsk();
+	return (title: string, options?: Omit<AskOptions, "hold">) => ask(title, options, true);
+}

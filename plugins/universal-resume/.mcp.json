@@ -1,0 +1,5 @@
+{
+	"mcpServers": {
+		"universal-resume": { "type": "http", "url": "https://universalresume.app/mcp" }
+	}
+}

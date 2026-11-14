@@ -1,0 +1,112 @@
+import type { PageMap } from "@universal-resume/pdf/page-map";
+import type { ResumeData } from "@universal-resume/schema/resume/data";
+import type { PDFDocumentProxy } from "pdfjs-dist";
+import type { CSSProperties, ReactNode } from "react";
+import { i18n } from "@lingui/core";
+import { ph } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
+import { Spinner } from "@universal-resume/ui/components/spinner";
+import { cn } from "@universal-resume/utils/style";
+import { DEFAULT_PDF_PAGE_SIZE, getResumePreviewGapValue, getScaledPreviewPageSize } from "./preview.shared.utils";
+
+export type ResumePreviewProps = {
+	className?: string;
+	data?: ResumeData | undefined;
+	pageGap?: CSSProperties["gap"];
+	pageLayout?: "horizontal" | "vertical";
+	pageScale?: number;
+	pageClassName?: string | undefined;
+	showPageNumbers?: boolean;
+	/** Letters show the sender's header, which a document with only a letter otherwise leaves out. */
+	includeCoverLetterHeader?: boolean;
+	/** The name of the text version screen readers read in place of the page images ("Resume content" by default). */
+	contentLabel?: string;
+	/** Drawn above each page (e.g. "Page 1 · Letter"). Replaces the small page-number caption. */
+	renderPageCaption?: (page: { pageNumber: number; totalPages: number }) => ReactNode;
+	/** Drawn over each page, in page-relative coordinates; receives the page map of the render on screen. */
+	renderPageOverlay?: (page: {
+		pageIndex: number;
+		pageMap: PageMap | undefined;
+		document: PDFDocumentProxy;
+		pageScale: number;
+	}) => ReactNode;
+	/** Called whenever the render on screen changes, with its physical page count and page map. */
+	/** Each render on screen: its page count, page map and the PDF itself. */
+	onRender?: (render: { pageCount: number; pageMap: PageMap | undefined; file: Blob }) => void;
+};
+
+type ResumePreviewLoaderProps = Pick<ResumePreviewProps, "pageClassName" | "showPageNumbers" | "data"> & {
+	pageCount?: number;
+	pageGap?: CSSProperties["gap"];
+	pageLayout?: "horizontal" | "vertical";
+	pageScale?: number;
+	/** Shown on the first page in place of the spinner when the render failed. */
+	failure?: ReactNode;
+};
+
+export function ResumePreviewLoader({
+	data,
+	pageCount = 1,
+	pageClassName,
+	pageGap = 16,
+	pageLayout = "horizontal",
+	pageScale = 1,
+	showPageNumbers = false,
+	failure,
+}: ResumePreviewLoaderProps) {
+	const { t } = useLingui();
+	const baseSize = data?.metadata.page.format === "letter" ? { width: 612, height: 792 } : DEFAULT_PDF_PAGE_SIZE;
+	const pageSize = getScaledPreviewPageSize(baseSize, pageScale);
+	const resolvedPageGap = getResumePreviewGapValue(pageGap);
+
+	return (
+		<div
+			// Chrome-only placeholder: anchor pages left-to-right so page 1 stays on-screen regardless of UI direction.
+			dir="ltr"
+			style={{ "--resume-preview-page-gap": resolvedPageGap } as CSSProperties}
+			className={cn(
+				"flex justify-start gap-(--resume-preview-page-gap)",
+				pageLayout === "horizontal" ? "flex-row items-start" : "flex-col items-center",
+			)}
+		>
+			{Array.from({ length: pageCount }, (_, index) => {
+				const pageNumber = index + 1;
+
+				return (
+					<figure key={pageNumber} className="shrink-0">
+						{showPageNumbers ? (
+							<figcaption className="mb-1 text-[0.625rem] font-medium text-ink-3">
+								<Trans>
+									Page {ph({ pageNumber: i18n.number(pageNumber) })} of {ph({ pageCount: i18n.number(pageCount) })}
+								</Trans>
+							</figcaption>
+						) : null}
+
+						<div
+							role={failure ? undefined : "img"}
+							aria-label={
+								failure
+									? undefined
+									: t`Loading resume page ${ph({ pageNumber: i18n.number(pageNumber) })} of ${ph({ pageCount: i18n.number(pageCount) })}`
+							}
+							style={pageSize}
+							className={cn(
+								"flex aspect-page items-center justify-center overflow-hidden rounded-md bg-paper text-ink-3",
+								pageClassName,
+							)}
+						>
+							{failure ? (
+								pageNumber === 1 && failure
+							) : (
+								<span className="flex items-center gap-2 text-xs">
+									<Spinner decorative />
+									<Trans>Loading page…</Trans>
+								</span>
+							)}
+						</div>
+					</figure>
+				);
+			})}
+		</div>
+	);
+}

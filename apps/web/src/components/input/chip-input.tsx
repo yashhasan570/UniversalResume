@@ -1,0 +1,446 @@
+import type { DndLabel } from "@/libs/dnd";
+import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core";
+import {
+	closestCenter,
+	DndContext,
+	DragOverlay,
+	KeyboardSensor,
+	PointerSensor,
+	useSensor,
+	useSensors,
+} from "@dnd-kit/core";
+import {
+	arrayMove,
+	rectSortingStrategy,
+	SortableContext,
+	sortableKeyboardCoordinates,
+	useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { t } from "@lingui/core/macro";
+import { Trans } from "@lingui/react/macro";
+import { useReducedMotion } from "motion/react";
+import * as React from "react";
+import { createPortal } from "react-dom";
+import { Badge } from "@universal-resume/ui/components/badge";
+import { useFormControl } from "@universal-resume/ui/components/form";
+import { Icon } from "@universal-resume/ui/components/icon";
+import { Input } from "@universal-resume/ui/components/input";
+import { Kbd } from "@universal-resume/ui/components/kbd";
+import { cn } from "@universal-resume/utils/style";
+import { useControlledState } from "@/hooks/use-controlled-state";
+import { dndContextProps } from "@/libs/dnd";
+import { isImeComposing } from "@/libs/keyboard";
+import { DRAG_SETTLE } from "@/libs/motion";
+
+const RETURN_KEY = "Enter";
+const EMPTY_CHIPS: string[] = [];
+
+type ChipItemProps = {
+	id: string;
+	chip: string;
+	index: number;
+	isEditing: boolean;
+	hash: boolean;
+	onEdit: (index: number) => void;
+	onRemove: (index: number) => void;
+};
+
+type ChipDragPreviewProps = {
+	chip: string;
+};
+
+function ChipDragPreview({ chip }: ChipDragPreviewProps) {
+	return (
+		<Badge
+			variant="outline"
+			className="h-6 max-w-44 cursor-grabbing justify-start rounded-md border-accent bg-sunken px-2 text-xs font-medium text-ink shadow-lg ring-2 ring-accent/25 select-none sm:max-w-52"
+		>
+			<span className="truncate">{chip}</span>
+		</Badge>
+	);
+}
+
+type ChipDragOverlayProps = {
+	activeChip: string | null;
+};
+
+function ChipDragOverlay({ activeChip }: ChipDragOverlayProps) {
+	const reduceMotion = useReducedMotion();
+	const overlay = (
+		<DragOverlay dropAnimation={reduceMotion ? null : DRAG_SETTLE}>
+			{activeChip ? <ChipDragPreview chip={activeChip} /> : null}
+		</DragOverlay>
+	);
+
+	return createPortal(overlay, document.body);
+}
+
+function ChipItem({ id, chip, index, isEditing, hash, onEdit, onRemove }: ChipItemProps) {
+	const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+		id,
+		data: { label: chip } satisfies DndLabel,
+		transition: DRAG_SETTLE,
+	});
+
+	const style = {
+		transition,
+		zIndex: isDragging ? 10 : undefined,
+		transform: CSS.Transform.toString(transform),
+	};
+
+	return (
+		<div
+			style={style}
+			ref={setNodeRef}
+			className={cn("group/chip relative touch-none", isDragging && "opacity-60")}
+			{...attributes}
+			{...listeners}
+		>
+			<Badge
+				variant="outline"
+				className={cn(
+					"h-[26px] max-w-full cursor-grab justify-start gap-0 rounded-sm border-transparent bg-sunken ps-2 pe-1 text-xs font-medium text-ink transition-colors select-none hover:bg-hover active:cursor-grabbing",
+					isEditing && "border-accent bg-accent/10 ring-1 ring-accent/40",
+					isDragging && "border-accent bg-sunken shadow-sm",
+				)}
+			>
+				<span className="max-w-32 truncate sm:max-w-44">{hash ? `#${chip}` : chip}</span>
+				<div
+					className={cn(
+						"ms-1.5 flex shrink-0 items-center gap-x-0.5 transition-opacity duration-quick group-focus-within/chip:opacity-100 group-hover/chip:opacity-100",
+						isEditing ? "opacity-100" : "opacity-65",
+					)}
+				>
+					<button
+						type="button"
+						tabIndex={-1}
+						className="hidden rounded-sm p-0.5 text-ink/70 transition-colors group-hover/chip:inline-flex hover:bg-sunken hover:text-ink focus:outline-none"
+						aria-label={t({
+							comment:
+								"Screen reader label for button that edits a keyword chip. Variable is the current keyword text.",
+							message: `Edit ${chip}`,
+						})}
+						onClick={(e) => {
+							e.stopPropagation();
+							onEdit(index);
+						}}
+					>
+						<Icon name="pencil-simple" size={14} />
+					</button>
+					<button
+						type="button"
+						tabIndex={-1}
+						className="rounded-sm p-0.5 text-ink/70 transition-colors hover:bg-danger/10 hover:text-danger-text focus:outline-none"
+						aria-label={t({
+							comment:
+								"Screen reader label for button that removes a keyword chip. Variable is the current keyword text.",
+							message: `Remove ${chip}`,
+						})}
+						onClick={(e) => {
+							e.stopPropagation();
+							onRemove(index);
+						}}
+					>
+						<Icon name="x" size={14} />
+					</button>
+				</div>
+			</Badge>
+		</div>
+	);
+}
+
+type Props = Omit<React.ComponentProps<"div">, "value" | "onChange"> & {
+	value?: string[];
+	defaultValue?: string[];
+	onChange?: (value: string[]) => void;
+	allowCommas?: boolean;
+	/** Explicit document saves include unfinished text without changing blur/autosave behavior. */
+	commitRef?: React.Ref<() => string[]>;
+	/** The empty field's hint; keywords by default. Document tags say "Add a tag…". */
+	placeholder?: string;
+	/** Tags this account already uses. Chosen ones are hidden, and typing narrows the rest. */
+	suggestions?: readonly string[];
+	/** A caption above the suggestions, for example "Your tags". */
+	suggestionsLabel?: string;
+	/** Writes tags as "#Design" and offers suggestions in one line after the caption, dashed (the bulk Tags dialog). */
+	hash?: boolean;
+};
+
+export function ChipInput({
+	value,
+	defaultValue = EMPTY_CHIPS,
+	onChange,
+	className,
+	allowCommas = false,
+	commitRef,
+	placeholder,
+	suggestions,
+	suggestionsLabel,
+	hash = false,
+	id: idProp,
+	"aria-describedby": ariaDescribedByProp,
+	"aria-invalid": ariaInvalidProp,
+	...props
+}: Props) {
+	const formControl = useFormControl();
+	const controlId = idProp ?? formControl.id;
+	const describedBy = ariaDescribedByProp ?? formControl["aria-describedby"];
+	const invalid = ariaInvalidProp ?? formControl["aria-invalid"];
+	const labelId = formControl.labelId;
+
+	const [chips, setChips] = useControlledState<string[]>({
+		value,
+		defaultValue,
+		onChange,
+	});
+
+	const [input, setInput] = React.useState("");
+	const [editingIndex, setEditingIndex] = React.useState<number | null>(null);
+	const [activeChip, setActiveChip] = React.useState<string | null>(null);
+	const inputRef = React.useRef<HTMLInputElement>(null);
+	const dndContextId = React.useId();
+	const isEditingKeyword = editingIndex !== null;
+	const hasChips = chips.length > 0;
+	// Suggestions follow what is typed, but never offer a tag that is already on the document.
+	const query = input.trim().toLocaleLowerCase();
+	const offered = (suggestions ?? []).filter(
+		(suggestion) => !chips.includes(suggestion) && suggestion.toLocaleLowerCase().includes(query),
+	);
+
+	const addChips = (values: string[]) => {
+		const nextValues = values.flatMap((chip) => {
+			const trimmed = chip.trim();
+			return trimmed ? [trimmed] : [];
+		});
+		if (nextValues.length === 0) return chips;
+
+		const next = [...new Set([...chips, ...nextValues])];
+		setChips(next);
+		return next;
+	};
+
+	const updateChip = (index: number, newValue: string) => {
+		const trimmed = newValue.trim();
+		if (!trimmed || index < 0 || index >= chips.length) return chips;
+
+		const existingIndex = chips.findIndex((c, i) => c === trimmed && i !== index);
+		if (existingIndex !== -1) return chips;
+
+		const newChips = [...chips];
+		newChips[index] = trimmed;
+		setChips(newChips);
+		return newChips;
+	};
+
+	React.useImperativeHandle(commitRef, () => () => {
+		const next = editingIndex === null ? addChips([input]) : updateChip(editingIndex, input);
+		setInput("");
+		setEditingIndex(null);
+		return next;
+	});
+
+	const removeChip = (index: number) => {
+		if (index < 0 || index >= chips.length) return;
+		setChips(chips.slice(0, index).concat(chips.slice(index + 1)));
+
+		if (editingIndex === index) {
+			setEditingIndex(null);
+			setInput("");
+		} else if (editingIndex !== null && editingIndex > index) {
+			setEditingIndex((current) => (current !== null && current > index ? current - 1 : current));
+		}
+	};
+
+	const handleEdit = (index: number) => {
+		const chip = chips[index];
+		if (chip === undefined) return;
+		setEditingIndex(index);
+		setInput(chip);
+		inputRef.current?.focus();
+	};
+
+	const sensors = useSensors(
+		useSensor(PointerSensor, {
+			activationConstraint: { distance: 3 },
+		}),
+		useSensor(KeyboardSensor, {
+			coordinateGetter: sortableKeyboardCoordinates,
+		}),
+	);
+
+	const handleDragEnd = (event: DragEndEvent) => {
+		setActiveChip(null);
+
+		const { active, over } = event;
+		if (!over || active.id === over.id) return;
+		const oldIndex = chips.indexOf(active.id as string);
+		const newIndex = chips.indexOf(over.id as string);
+		if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return;
+
+		const newOrder = arrayMove(chips, oldIndex, newIndex);
+		if (editingIndex !== null) {
+			const editingChip = chips[editingIndex];
+			const movedIndex = editingChip === undefined ? -1 : newOrder.indexOf(editingChip);
+			if (movedIndex !== -1 && movedIndex !== editingIndex) setEditingIndex(movedIndex);
+		}
+		setChips(newOrder);
+	};
+
+	const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+		const newValue = e.target.value;
+
+		if (editingIndex !== null) {
+			if (!allowCommas && newValue.includes(",")) {
+				updateChip(editingIndex, newValue.replace(",", ""));
+				setEditingIndex(null);
+				setInput("");
+			} else {
+				setInput(newValue);
+			}
+			return;
+		}
+
+		if (!allowCommas && newValue.includes(",")) {
+			const parts = newValue.split(",");
+			addChips(parts.slice(0, -1));
+			setInput(parts.at(-1) ?? "");
+		} else {
+			setInput(newValue);
+		}
+	};
+
+	const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+		if (isImeComposing(e)) return;
+		if (e.key === "Enter" || (!allowCommas && e.key === ",")) {
+			e.preventDefault();
+
+			if (editingIndex !== null) {
+				if (input.trim()) {
+					updateChip(editingIndex, input);
+				}
+				setEditingIndex(null);
+				setInput("");
+			} else if (input.trim()) {
+				addChips([input]);
+				setInput("");
+			}
+		} else if (e.key === "Escape" && editingIndex !== null) {
+			setEditingIndex(null);
+			setInput("");
+		}
+	};
+
+	return (
+		<div className={cn("space-y-1.5", className)} {...props}>
+			<DndContext
+				{...dndContextProps(true)}
+				id={dndContextId}
+				sensors={sensors}
+				collisionDetection={closestCenter}
+				onDragStart={(event: DragStartEvent) => setActiveChip(event.active.id as string)}
+				onDragEnd={handleDragEnd}
+				onDragCancel={() => setActiveChip(null)}
+			>
+				<div
+					role="none"
+					onClick={() => inputRef.current?.focus()}
+					className="overflow-hidden rounded-md border border-control-border bg-raised transition-colors focus-within:border-accent focus-within:ring-3 focus-within:ring-accent-soft"
+				>
+					<div className="flex min-h-10 flex-wrap items-center gap-1.5 p-1.5">
+						<div className={cn("contents", !hasChips && "hidden")}>
+							<SortableContext items={chips} strategy={rectSortingStrategy}>
+								<div className="contents">
+									{chips.map((chip, idx) => (
+										<ChipItem
+											key={chip}
+											id={chip}
+											chip={chip}
+											index={idx}
+											isEditing={editingIndex === idx}
+											hash={hash}
+											onEdit={handleEdit}
+											onRemove={removeChip}
+										/>
+									))}
+								</div>
+							</SortableContext>
+						</div>
+						<div className="flex min-w-24 flex-1 items-center gap-1.5 px-1">
+							<Input
+								ref={inputRef}
+								type="text"
+								id={controlId}
+								value={input}
+								autoComplete="off"
+								// A resolvable aria-labelledby outranks aria-label, so a rendered FormLabel still wins;
+								// when the FormControl has no FormLabel the reference dangles and the accessible name
+								// falls back to aria-label instead of going empty.
+								aria-label={isEditingKeyword ? t`Edit keyword` : t`Add keyword`}
+								aria-labelledby={labelId}
+								aria-describedby={describedBy}
+								aria-invalid={invalid}
+								placeholder={isEditingKeyword ? t`Editing keyword…` : (placeholder ?? t`Add a keyword…`)}
+								onKeyDown={handleKeyDown}
+								onChange={handleInputChange}
+								className="h-6 min-w-0 flex-1 border-none bg-transparent p-0 shadow-none focus-visible:border-none focus-visible:ring-0 dark:bg-transparent"
+							/>
+							{isEditingKeyword && (
+								<span className="flex h-6 shrink-0 items-center rounded-md border border-accent/30 bg-accent/10 px-1.5 text-xs font-medium text-accent-text">
+									<Trans>Edit</Trans>
+								</span>
+							)}
+						</div>
+					</div>
+				</div>
+				<ChipDragOverlay activeChip={activeChip} />
+			</DndContext>
+
+			{!suggestions && (
+				<p className="text-xs text-ink-3">
+					{allowCommas ? (
+						<Trans>
+							Press <Kbd>{RETURN_KEY}</Kbd> to add or save the current keyword.
+						</Trans>
+					) : (
+						<Trans>
+							<Kbd>{RETURN_KEY}</Kbd> or a comma adds one. Drag to reorder.
+						</Trans>
+					)}
+				</p>
+			)}
+
+			{offered.length > 0 && (
+				<div className={cn("gap-1.5", hash ? "flex flex-wrap items-center gap-x-2.5" : "grid")}>
+					{suggestionsLabel && <p className="text-xs text-ink-3">{suggestionsLabel}</p>}
+					<div className={cn("flex max-h-28 flex-wrap gap-1.5 overflow-y-auto", hash && "contents")}>
+						{offered.map((suggestion) => (
+							<button
+								key={suggestion}
+								type="button"
+								aria-label={t({
+									comment: "Button that adds a suggested tag. Variable is the tag text.",
+									message: `Add ${suggestion}`,
+								})}
+								className={cn(
+									"inline-flex min-h-7 max-w-full items-center gap-1 rounded-sm border border-line-2 px-2.5 text-[13px] text-ink-2 transition-colors duration-quick hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none pointer-coarse:min-h-11",
+									hash && "border-dashed",
+								)}
+								onClick={() => {
+									if (editingIndex === null) addChips([suggestion]);
+									else updateChip(editingIndex, suggestion);
+									setInput("");
+									setEditingIndex(null);
+									inputRef.current?.focus();
+								}}
+							>
+								{!hash && <Icon name="plus" size={12} className="shrink-0 text-ink-3" />}
+								<span className="truncate">{hash ? `#${suggestion}` : suggestion}</span>
+							</button>
+						))}
+					</div>
+				</div>
+			)}
+		</div>
+	);
+}

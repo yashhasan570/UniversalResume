@@ -1,0 +1,97 @@
+import { t } from "@lingui/core/macro";
+import { useRef } from "react";
+import { Button } from "@universal-resume/ui/components/button";
+import { Icon } from "@universal-resume/ui/components/icon";
+import { toast } from "@universal-resume/ui/components/toast";
+import { AttachmentPreview } from "./attachment-preview";
+
+export type FileAttachment = { url: string; name: string };
+
+type Props = {
+	// A saved attachment, a locally picked file, or nothing.
+	value: FileAttachment | File | null;
+	onChange: (value: File | null) => void;
+	// Copy for the empty-state button, e.g. "Attach a cover letter (PDF, up to 10 MB)".
+	attachLabel: string;
+	disabled?: boolean;
+};
+
+// Picking/removing changes only the parent's draft; the application save owns storage.
+export function FileAttachmentField({ value, onChange, attachLabel, disabled }: Props) {
+	const inputRef = useRef<HTMLInputElement>(null);
+
+	const onSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+		const file = event.target.files?.[0];
+		if (!file) return;
+		event.target.value = "";
+		if (file.type !== "application/pdf") {
+			toast.add({ type: "error", description: t`Choose a PDF file.` });
+			return;
+		}
+		if (file.size > 10 * 1024 * 1024) {
+			toast.add({
+				type: "error",
+				description: t`This PDF is larger than 10 MB. Compress it or export a smaller PDF, then attach it again.`,
+			});
+			return;
+		}
+		onChange(file);
+	};
+
+	return (
+		<>
+			{value ? (
+				<div className="grid gap-2 rounded-lg border border-line p-2.5">
+					<div className="flex items-center gap-3">
+						<span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-sunken text-ink-2">
+							<Icon name="file-pdf" size={18} />
+						</span>
+						{value instanceof File ? (
+							<span className="min-w-0 flex-1 truncate text-sm">{value.name}</span>
+						) : (
+							<a
+								href={value.url}
+								target="_blank"
+								rel="noreferrer"
+								className="min-w-0 flex-1 truncate text-sm hover:underline"
+							>
+								{value.name}
+							</a>
+						)}
+						<Button
+							type="button"
+							size="icon-sm"
+							variant="ghost"
+							title={t`Remove file`}
+							aria-label={t`Remove file`}
+							disabled={disabled}
+							onClick={() => onChange(null)}
+						>
+							<Icon name="x" />
+						</Button>
+					</div>
+					<AttachmentPreview source={value instanceof File ? value : value.url} name={value.name} />
+				</div>
+			) : (
+				<button
+					type="button"
+					disabled={disabled}
+					onClick={() => inputRef.current?.click()}
+					className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-start text-sm/5 text-ink-2 outline-1 -outline-offset-1 outline-line-2 transition-[background-color,opacity] duration-quick outline-dashed hover:bg-hover disabled:opacity-45"
+				>
+					<Icon name="upload-simple" size={18} className="shrink-0 text-ink-3" />
+					{attachLabel}
+				</button>
+			)}
+			<input
+				ref={inputRef}
+				type="file"
+				accept="application/pdf"
+				aria-label={attachLabel}
+				className="hidden"
+				disabled={disabled}
+				onChange={onSelect}
+			/>
+		</>
+	);
+}

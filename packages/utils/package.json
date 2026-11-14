@@ -1,0 +1,51 @@
+{
+	"name": "@universal-resume/utils",
+	"version": "0.0.0",
+	"type": "module",
+	"private": true,
+	"exports": {
+		"./account-zip": "./src/account-zip.ts",
+		"./amount": "./src/amount.ts",
+		"./app-paths": "./src/app-paths.ts",
+		"./auth-intent": "./src/auth-intent.ts",
+		"./color": "./src/color.ts",
+		"./deferred-request": "./src/deferred-request.ts",
+		"./file": "./src/file.ts",
+		"./form-fill": "./src/form-fill.ts",
+		"./http": "./src/http.ts",
+		"./ics": "./src/ics.ts",
+		"./link": "./src/link.ts",
+		"./locale": "./src/locale.ts",
+		"./monorepo.node": "./src/monorepo.node.ts",
+		"./queue": "./src/queue.ts",
+		"./rate-limit": "./src/rate-limit.ts",
+		"./region": "./src/region.ts",
+		"./slug": "./src/slug.ts",
+		"./string": "./src/string.ts",
+		"./style": "./src/style.ts",
+		"./timezone": "./src/timezone.ts",
+		"./url-security.node": "./src/url-security.node.ts"
+	},
+	"scripts": {
+		"typecheck": "tsrs --noEmit",
+		"test": "vp test run --passWithNoTests",
+		"test:coverage": "vp test run --coverage --passWithNoTests",
+		"test:ci": "vp test run --reporter=default --reporter=github-actions --reporter=json --reporter=junit --outputFile.json=reports/vitest-results.json --outputFile.junit=reports/vitest-junit.xml --passWithNoTests"
+	},
+	"dependencies": {
+		"@sindresorhus/slugify": "^4.0.1",
+		"@uiw/color-convert": "catalog:",
+		"cn": "^0.5.2",
+		"fflate": "catalog:",
+		"unique-names-generator": "^4.7.1",
+		"uuid": "^14.0.3",
+		"zod": "catalog:"
+	},
+	"devDependencies": {
+		"@universal-resume/config": "workspace:*",
+		"@types/node": "catalog:",
+		"tsrs": "catalog:",
+		"typescript": "catalog:",
+		"vite-plus": "catalog:"
+	}
+}

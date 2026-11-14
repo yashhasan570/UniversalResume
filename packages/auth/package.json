@@ -1,0 +1,40 @@
+{
+	"name": "@universal-resume/auth",
+	"version": "0.0.0",
+	"type": "module",
+	"private": true,
+	"exports": {
+		"./config": "./src/config.ts",
+		"./trusted-origins": "./src/trusted-origins.ts",
+		"./types": "./src/types.ts"
+	},
+	"scripts": {
+		"typecheck": "tsrs --noEmit",
+		"test": "vp test run --passWithNoTests",
+		"test:coverage": "vp test run --coverage --passWithNoTests",
+		"test:ci": "vp test run --reporter=default --reporter=github-actions --reporter=json --reporter=junit --outputFile.json=reports/vitest-results.json --outputFile.junit=reports/vitest-junit.xml --passWithNoTests"
+	},
+	"dependencies": {
+		"@better-auth/api-key": "catalog:",
+		"@better-auth/drizzle-adapter": "catalog:",
+		"@better-auth/infra": "catalog:",
+		"@better-auth/oauth-provider": "catalog:",
+		"@better-auth/passkey": "catalog:",
+		"@universal-resume/db": "workspace:*",
+		"@universal-resume/email": "workspace:*",
+		"@universal-resume/env": "workspace:*",
+		"@universal-resume/utils": "workspace:*",
+		"bcryptjs": "catalog:",
+		"better-auth": "catalog:",
+		"drizzle-orm": "catalog:",
+		"jose": "^6.2.17",
+		"react": "catalog:"
+	},
+	"devDependencies": {
+		"@universal-resume/config": "workspace:*",
+		"@types/react": "catalog:",
+		"tsrs": "catalog:",
+		"typescript": "catalog:",
+		"vite-plus": "catalog:"
+	}
+}

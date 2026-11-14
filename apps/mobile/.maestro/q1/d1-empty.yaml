@@ -1,0 +1,19 @@
+# D1 · Empty: an account with no documents says "Import or create a resume" with New, which opens D3.
+appId: me.universalresume.storyboard
+---
+- launchApp:
+    clearState: true
+- openLink: me.universalresume.storyboard://storyboard/T2-FirstRun?theme=light
+- extendedWaitUntil:
+    visible:
+      id: storyboard-ready
+    timeout: 90000
+- openLink: me.universalresume.storyboard://documents
+- extendedWaitUntil:
+    visible: Import or create a resume
+    timeout: 10000
+- tapOn:
+    text: New
+    index: 1
+- waitForAnimationToEnd
+- assertVisible: Import a resume

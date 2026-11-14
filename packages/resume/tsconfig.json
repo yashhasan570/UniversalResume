@@ -1,0 +1,3 @@
+{
+	"extends": "@universal-resume/config/tsconfig.base.json"
+}

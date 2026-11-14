@@ -1,0 +1,15 @@
+{
+	"extends": ["//"],
+	"tags": ["app:web"],
+	"tasks": {
+		"build": {
+			"outputs": ["$TURBO_EXTENDS$", "dist-prerender/**"],
+			"inputs": [
+				"$TURBO_EXTENDS$",
+				"$TURBO_DEFAULT$",
+				"$TURBO_ROOT$/tooling/capture/**",
+				"$TURBO_ROOT$/tooling/package.json"
+			]
+		}
+	}
+}

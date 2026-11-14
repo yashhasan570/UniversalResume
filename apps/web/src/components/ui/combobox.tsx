@@ -1,0 +1,242 @@
+import type { ComboboxTriggerState } from "@base-ui/react/combobox";
+import type { UseRenderRenderProp } from "@base-ui/react/use-render";
+import { t } from "@lingui/core/macro";
+import React from "react";
+import { Button } from "@universal-resume/ui/components/button";
+import {
+	ComboboxClear,
+	ComboboxContent,
+	ComboboxEmpty,
+	ComboboxInput,
+	ComboboxItem,
+	ComboboxList,
+	ComboboxRoot,
+	ComboboxTrigger,
+	ComboboxValue,
+	useFilter,
+} from "@universal-resume/ui/components/combobox";
+import { Input } from "@universal-resume/ui/components/input";
+import { cn } from "@universal-resume/utils/style";
+import { useControlledState } from "@/hooks/use-controlled-state";
+
+type ComboboxOption<TValue extends string | number = string> = {
+	value: TValue;
+	label: React.ReactNode;
+	// Plain-text label used for the collapsed trigger and filtering when `label` is a ReactNode.
+	// Without it, a JSX label falls back to String(value) (e.g. a raw enum or locale code) in the trigger.
+	textValue?: string;
+	keywords?: string[];
+	disabled?: boolean;
+};
+
+type SingleComboboxProps<TValue extends string | number = string> = {
+	options: ComboboxOption<TValue>[];
+	value?: TValue | null | undefined;
+	defaultValue?: TValue | null | undefined;
+	onValueChange?: (value: TValue | null) => void;
+	multiple?: false;
+	disabled?: boolean;
+	"aria-label"?: string;
+	"aria-describedby"?: string;
+	"aria-labelledby"?: string;
+	showClear?: boolean;
+	caret?: "down" | "up-down";
+	/** Two columns for long, named provider lists. */
+	columns?: 1 | 2;
+	/** An action beneath the searchable options. */
+	footer?: React.ReactNode;
+	placeholder?: string;
+	emptyMessage?: React.ReactNode;
+	className?: string;
+	id?: string;
+	name?: string;
+	render?: UseRenderRenderProp<ComboboxTriggerState>;
+};
+
+type MultiComboboxProps<TValue extends string | number = string> = {
+	options: ComboboxOption<TValue>[];
+	value?: TValue[] | null | undefined;
+	defaultValue?: TValue[] | null | undefined;
+	onValueChange?: (value: TValue[] | null) => void;
+	multiple: true;
+	disabled?: boolean;
+	"aria-label"?: string;
+	"aria-describedby"?: string;
+	"aria-labelledby"?: string;
+	showClear?: boolean;
+	caret?: "down" | "up-down";
+	/** Two columns for long, named provider lists. */
+	columns?: 1 | 2;
+	/** An action beneath the searchable options. */
+	footer?: React.ReactNode;
+	placeholder?: string;
+	emptyMessage?: React.ReactNode;
+	className?: string;
+	id?: string;
+	name?: string;
+	render?: UseRenderRenderProp<ComboboxTriggerState>;
+};
+
+type ComboboxProps<TValue extends string | number = string> = SingleComboboxProps<TValue> | MultiComboboxProps<TValue>;
+
+const listContent = <TValue extends string | number>(item: ComboboxOption<TValue>) => (
+	<ComboboxItem key={String(item.value)} value={item} disabled={item.disabled}>
+		{item.label}
+	</ComboboxItem>
+);
+
+function Combobox<TValue extends string | number = string>(props: ComboboxProps<TValue>) {
+	const {
+		options,
+		multiple = false,
+		disabled = false,
+		showClear = false,
+		caret = "down",
+		columns = 1,
+		placeholder,
+		emptyMessage,
+		className,
+		id,
+		name,
+		render,
+	} = props;
+
+	const { contains } = useFilter();
+	const [open, setOpen] = React.useState(false);
+
+	const optionMap = new Map(options.map((opt) => [String(opt.value), opt]));
+
+	const findOption = (v: TValue | TValue[] | null | undefined) => {
+		if (multiple) {
+			if (!v || !Array.isArray(v)) return [];
+			return (v as TValue[]).flatMap((item) => {
+				const option = optionMap.get(String(item));
+				return option ? [option] : [];
+			});
+		}
+		if (v == null) return null;
+		return optionMap.get(String(v)) ?? null;
+	};
+
+	type OptionValue = ComboboxOption<TValue>[] | ComboboxOption<TValue> | null;
+
+	const resolvedValue = props.value !== undefined ? (findOption(props.value) as OptionValue) : undefined;
+	const resolvedDefaultValue =
+		props.defaultValue !== undefined ? (findOption(props.defaultValue) as OptionValue) : undefined;
+
+	const handleExternalChange = (option: ComboboxOption<TValue>[] | ComboboxOption<TValue> | null) => {
+		if (multiple) {
+			const arrOpt = Array.isArray(option) ? option : option ? [option] : [];
+			(props as MultiComboboxProps<TValue>).onValueChange?.(arrOpt.length > 0 ? arrOpt.map((opt) => opt.value) : []);
+		} else {
+			const value = option && !Array.isArray(option) ? (option as ComboboxOption<TValue>).value : null;
+			const cb = props.onValueChange as ((value: TValue | null) => void) | undefined;
+			cb?.(value ?? null);
+		}
+	};
+
+	const [selectedValue, setSelectedValue] = useControlledState({
+		value: resolvedValue,
+		defaultValue: resolvedDefaultValue,
+		onChange: handleExternalChange,
+	});
+
+	const itemToStringLabel = (item: ComboboxOption<TValue>) =>
+		item.textValue ?? (typeof item.label === "string" ? item.label : String(item.value));
+
+	const isItemEqualToValue = (a: ComboboxOption<TValue>, b: ComboboxOption<TValue>) =>
+		String(a.value) === String(b.value);
+
+	const filter = (item: ComboboxOption<TValue>, query: string) => {
+		const labelStr = typeof item.label === "string" ? item.label : (item.textValue ?? String(item.value));
+		if (contains(labelStr, query)) return true;
+		return item.keywords?.some((kw) => contains(kw, query)) ?? false;
+	};
+
+	const hasSelectedValue = multiple
+		? Array.isArray(selectedValue) && selectedValue.length > 0
+		: selectedValue !== null && selectedValue !== undefined;
+
+	const triggerNode = (
+		<ComboboxTrigger
+			caret={caret}
+			aria-label={props["aria-label"]}
+			aria-describedby={props["aria-describedby"]}
+			aria-labelledby={props["aria-labelledby"]}
+			id={id}
+			disabled={disabled}
+			render={
+				render ?? (
+					<Button
+						variant="secondary"
+						// Calm Combobox: a 40px input-like trigger (raised, control-border edge), not a button.
+						className={cn(
+							"h-10 justify-start bg-raised px-3 text-start font-normal shadow-[inset_0_0_0_1px_var(--control-border)] hover:bg-raised",
+							className,
+						)}
+					/>
+				)
+			}
+		>
+			<span className={cn("min-w-0 flex-1 truncate text-start", showClear && hasSelectedValue && "pe-7")}>
+				<ComboboxValue placeholder={placeholder ?? t`Select…`} />
+			</span>
+		</ComboboxTrigger>
+	);
+
+	return (
+		<ComboboxRoot
+			open={open}
+			onOpenChange={setOpen}
+			name={name}
+			items={options}
+			filter={filter}
+			disabled={disabled}
+			value={selectedValue as ComboboxOption<TValue>[] & ComboboxOption<TValue>}
+			onValueChange={setSelectedValue as (value: ComboboxOption<TValue>[] | ComboboxOption<TValue> | null) => void}
+			itemToStringLabel={itemToStringLabel}
+			isItemEqualToValue={isItemEqualToValue}
+			{...(multiple ? { multiple: true } : {})}
+		>
+			{showClear ? (
+				<div className="relative w-full min-w-0">
+					{triggerNode}
+					{hasSelectedValue && (
+						<ComboboxClear
+							aria-label={t`Clear selection`}
+							disabled={disabled}
+							className="absolute end-7 top-1/2 z-10 -translate-y-1/2 text-ink-3 opacity-70 hover:opacity-100 focus-visible:opacity-100"
+						/>
+					)}
+				</div>
+			) : (
+				triggerNode
+			)}
+
+			<ComboboxContent
+				aria-label={placeholder ?? t`Options`}
+				className={columns === 2 ? "w-[480px] max-w-[calc(100vw-2rem)] min-w-0" : undefined}
+			>
+				<ComboboxInput
+					placeholder={placeholder ?? t`Search…`}
+					render={<Input disabled={disabled} className="border-none focus-visible:border-none focus-visible:ring-0" />}
+				/>
+				<ComboboxEmpty>{emptyMessage ?? t`No results found.`}</ComboboxEmpty>
+				<ComboboxList
+					className={
+						columns === 2 ? "grid max-h-[min(400px,calc(var(--available-height)-44px))] grid-cols-2" : undefined
+					}
+				>
+					{listContent}
+				</ComboboxList>
+				{props.footer && (
+					<div role="presentation" className="border-t border-line p-1" onClick={() => setOpen(false)}>
+						{props.footer}
+					</div>
+				)}
+			</ComboboxContent>
+		</ComboboxRoot>
+	);
+}
+
+export { Combobox, type ComboboxOption, type MultiComboboxProps, type SingleComboboxProps };

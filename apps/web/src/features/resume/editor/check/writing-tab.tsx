@@ -1,0 +1,417 @@
+import "./writing-tab.css";
+import type { WritingNote } from "../store";
+import type { CheckIssue } from "./issues";
+import type { AiUsageSummary } from "@universal-resume/schema/ai-usage";
+import type { ResumeData } from "@universal-resume/schema/resume/data";
+import { i18n } from "@lingui/core";
+import { t } from "@lingui/core/macro";
+import { Plural, Trans } from "@lingui/react/macro";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { buildMarkdown } from "@universal-resume/resume/markdown";
+import { collectPassages } from "@universal-resume/resume/proposals";
+import { getProposalState } from "@universal-resume/resume/proposals";
+import { Button } from "@universal-resume/ui/components/button";
+import { Icon } from "@universal-resume/ui/components/icon";
+import { Spinner } from "@universal-resume/ui/components/spinner";
+import { useBreakpoint } from "@universal-resume/ui/hooks/use-breakpoint";
+import { cn } from "@universal-resume/utils/style";
+import { ChangeSet } from "../proposals/proposal-list";
+import { acceptResumeProposals } from "../proposals/proposals";
+import { useEditorStore } from "../store";
+import { describeEntry } from "../write/model";
+import { CheckAiLine } from "./ai-line";
+import { getSectionName } from "./issues";
+import { mapWritingReview, editWritingProposal } from "./review";
+import { List, ListRow } from "@/components/calm/list-row";
+import { AiResultUsage } from "@/features/ai/usage";
+import { SetUpAi } from "@/features/assistant/provider-setup";
+import { useIsResumeLocked, useResumeStore } from "@/features/resume/builder/draft";
+import { formatVersionTime } from "@/features/resume/share/format";
+import { AiProviderLoadState } from "@/features/settings/integrations/ai-provider-load-state";
+import { AiProviderPicker } from "@/features/settings/integrations/components/ai-provider-picker";
+import { useHasUsableAiProvider } from "@/features/settings/integrations/hooks/use-has-usable-ai-provider";
+import { getOrpcErrorMessage } from "@/libs/error-message";
+import { orpc } from "@/libs/orpc/client";
+
+/** The endpoint's caps; the text and lists are trimmed here so a long resume is never refused. */
+const MAX_TEXT_CHARS = 50_000;
+const MAX_FINDINGS = 120;
+const MAX_PASSAGES = 120;
+const MAX_PASSAGE_CHARS = 1_000;
+
+type WritingTabProps = { data: ResumeData; issues: readonly CheckIssue[] };
+
+/**
+ * Writing: an opt-in AI review of the wording. It says what it sends before it runs, returns rewrites of bullets
+ * and paragraphs as proposals to accept or reject, and is never part of the score. Its errors stay in this tab.
+ */
+export function WritingTab({ data, issues }: WritingTabProps) {
+	const resumeId = useResumeStore((state) => state.resume?.id);
+	const queryClient = useQueryClient();
+	const saved = useQuery({
+		...orpc.ai.writingReview.queryOptions({ input: { resumeId: resumeId ?? "" } }),
+		enabled: !!resumeId,
+	});
+	const hydrated = useRef<string | null>(null);
+	const [reviewInput, setReviewInput] = useState<string | null>(null);
+	const [reviewedAt, setReviewedAt] = useState<Date | null>(null);
+	const [reviewUsage, setReviewUsage] = useState<AiUsageSummary | null>(null);
+	const providerState = useHasUsableAiProvider();
+	const { usableProviders, hasUsableProvider } = providerState;
+	const [providerOverride, setProviderOverride] = useState<string | null>(null);
+	const [choosing, setChoosing] = useState(false);
+	const review = useEditorStore((state) => state.writingReview);
+	const proposals = useEditorStore((state) => state.proposals);
+	const locked = useIsResumeLocked();
+	const applications = useResumeStore((state) => state.proposalApplications);
+	const setProposalStatus = useEditorStore((state) => state.setProposalStatus);
+
+	const provider = usableProviders.find((entry) => entry.id === providerOverride) ?? usableProviders[0];
+	const passages = collectPassages(data, {
+		summary: getSectionName(data, "summary"),
+		sectionTitle: (sectionId) => getSectionName(data, sectionId),
+		entryTitle: (type, entry) => describeEntry(type as never, entry as never).title,
+		bullet: (n) => t`bullet ${n}`,
+		paragraph: (n) => t`paragraph ${n}`,
+	}).slice(0, MAX_PASSAGES);
+
+	const inputText = buildMarkdown(data).slice(0, MAX_TEXT_CHARS).trim();
+	useEffect(() => {
+		const entry = saved.data;
+		if (!entry || useResumeStore.getState().resume?.id !== resumeId) return;
+		const identity = `${resumeId}:${entry.reviewedAt.toISOString()}`;
+		if (hydrated.current === identity) return;
+		hydrated.current = identity;
+		const current = entry.inputText === inputText;
+		const { proposals: next, notes } = mapWritingReview(
+			entry.review.suggestions,
+			current ? passages : [],
+			entry.passages,
+			inputText,
+		);
+		useEditorStore.setState({
+			proposals: next.map((proposal) => ({
+				...proposal,
+				...(entry.aiOperationIds?.length ? { aiOperationIds: entry.aiOperationIds } : {}),
+			})),
+			writingReview: { summary: entry.review.summary, strengths: entry.review.strengths, notes },
+		});
+		setReviewInput(entry.inputText);
+		setReviewedAt(entry.reviewedAt);
+		setReviewUsage(entry.aiUsage ?? null);
+	}, [saved.data, inputText, passages, resumeId]);
+
+	const { mutate, isPending, error, reset } = useMutation({
+		...orpc.ai.atsReview.mutationOptions(),
+		onSuccess: async (_result, input) => {
+			await queryClient.invalidateQueries({
+				queryKey: orpc.ai.writingReview.queryKey({ input: { resumeId: input.resumeId ?? "" } }),
+			});
+		},
+	});
+
+	const run = () => {
+		if (!provider || isPending || !resumeId) return;
+		reset();
+		mutate({
+			resumeId,
+			...(provider ? { aiProviderId: provider.id } : {}),
+			extractedText: buildMarkdown(data).slice(0, MAX_TEXT_CHARS),
+			findings: issues.slice(0, MAX_FINDINGS).map((issue) => ({
+				code: issue.finding.code,
+				severity: issue.finding.severity,
+				message: issue.title.slice(0, 300),
+			})),
+			passages: passages.map((passage) => ({
+				id: passage.id,
+				where: passage.location.slice(0, 200),
+				text: passage.text.slice(0, MAX_PASSAGE_CHARS),
+			})),
+		});
+	};
+
+	if (saved.isError && !review)
+		return (
+			<div role="alert" className="grid gap-2 p-4">
+				<p>
+					<Trans>Couldn't load the saved review.</Trans>
+				</p>
+				<Button variant="secondary" onClick={() => void saved.refetch()}>
+					<Trans>Retry</Trans>
+				</Button>
+			</div>
+		);
+	if (providerState.isUnavailable && !review) return <AiProviderLoadState state={providerState} />;
+
+	if (!hasUsableProvider && !review)
+		return (
+			<div>
+				<CheckAiLine lead={<Trans>A writing review needs AI.</Trans>}>
+					<Trans>Issues and Job match work without it.</Trans>
+				</CheckAiLine>
+				{/* The two tabs that work without AI, as rows (N12 tile 09). */}
+				<List className="mt-3">
+					<ListRow
+						caret
+						title={<Trans>Issues</Trans>}
+						subtitle={
+							issues.length ? (
+								<Plural
+									value={issues.length}
+									one="# thing to review, each with one fix"
+									other="# things to review, each with one fix"
+								/>
+							) : (
+								<Trans>Nothing to review</Trans>
+							)
+						}
+						render={<button type="button" onClick={() => useEditorStore.setState({ checkTab: "issues" })} />}
+					/>
+					<ListRow
+						caret
+						title={<Trans>Job match</Trans>}
+						subtitle={<Trans>Which terms from a posting appear in it</Trans>}
+						render={<button type="button" onClick={() => useEditorStore.setState({ checkTab: "match" })} />}
+					/>
+				</List>
+			</div>
+		);
+
+	if (isPending) {
+		return (
+			<div aria-busy="true" className="flex items-center gap-2.5 py-4 text-sm text-ink-2">
+				<Spinner />
+				<Plural
+					value={passages.length}
+					one="Reading # passage of your resume…"
+					other="Reading # bullets and paragraphs of your resume…"
+				/>
+			</div>
+		);
+	}
+
+	if (error) {
+		return (
+			<div className="grid gap-3">
+				<div
+					role="alert"
+					className="flex gap-2.5 rounded-xl bg-danger-soft p-3 text-[13px] leading-[18px] text-danger-text"
+				>
+					<Icon name="warning-circle" />
+					<span>
+						{getOrpcErrorMessage(error, {
+							byCode: {
+								BAD_GATEWAY: t`Couldn't reach your AI provider. Its key may have expired.`,
+								BAD_REQUEST: t`The provider returned a review that couldn't be read. Try again.`,
+								PRECONDITION_FAILED: t`AI providers are unavailable until ENCRYPTION_SECRET is configured.`,
+							},
+							fallback: t`The review couldn't finish. Try again.`,
+						})}
+					</span>
+				</div>
+				<div className="flex gap-1.5">
+					<Button size="sm" variant="secondary" onClick={run}>
+						<Trans>Retry</Trans>
+					</Button>
+					<SetUpAi />
+				</div>
+				<p className="text-xs text-ink-3">
+					<Trans>Issues and Job match still work without AI.</Trans>
+				</p>
+			</div>
+		);
+	}
+
+	if (!review) {
+		return (
+			<div className="grid gap-3 py-3">
+				<strong className="text-sm font-semibold">
+					<Trans>A second opinion on your wording</Trans>
+				</strong>
+				{/* Nothing to read yet: the title, the disabled button and why (B22 tile 10). */}
+				{passages.length > 0 && (
+					<>
+						<p className="text-[13px] leading-[18px] text-ink-2">
+							<Trans>
+								The checks are mechanical. This asks a language model how a reader might react to your bullets and
+								suggests rewrites. It isn't part of the checks.
+							</Trans>
+						</p>
+						<div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-ink-3">
+							<Icon name="lock" size={16} />
+							<span>
+								{provider?.label} · {provider?.model}
+							</span>
+							<button
+								type="button"
+								aria-expanded={choosing}
+								className="font-medium text-ink-2 underline underline-offset-2"
+								onClick={() => setChoosing(!choosing)}
+							>
+								<Trans>Change</Trans>
+							</button>
+						</div>
+					</>
+				)}
+				{choosing && (
+					<AiProviderPicker
+						value={provider?.id ?? null}
+						providers={usableProviders}
+						onValueChange={(value) => {
+							setProviderOverride(value);
+							setChoosing(false);
+						}}
+					/>
+				)}
+				<Button size="sm" variant="secondary" className="w-fit" disabled={passages.length === 0} onClick={run}>
+					<Icon name="sparkle" size={16} />
+					<Trans>Review writing</Trans>
+				</Button>
+				{passages.length === 0 && (
+					<p className="text-xs text-ink-3">
+						<Trans>Add a summary or describe a role first; there's nothing to review yet.</Trans>
+					</p>
+				)}
+			</div>
+		);
+	}
+
+	return (
+		<div className="flex min-h-full flex-col gap-2 pt-2">
+			{!hasUsableProvider && (
+				<CheckAiLine lead={<Trans>A writing review needs AI.</Trans>}>
+					<Trans>Issues and Job match work without it.</Trans>
+				</CheckAiLine>
+			)}
+			<div className="flex items-start justify-between gap-2">
+				{reviewedAt && (
+					<p className="text-xs text-ink-3">
+						<Trans>Reviewed {formatVersionTime(reviewedAt, i18n.locale)}</Trans>
+						{reviewUsage?.models.map((model) => (
+							<span key={model.providerId}>
+								{" "}
+								· {model.label} · {model.model}
+							</span>
+						))}
+					</p>
+				)}
+				{hasUsableProvider && (
+					<button type="button" className="shrink-0 text-[13px]/5 font-medium text-accent-text" onClick={run}>
+						<Trans>Run again</Trans>
+					</button>
+				)}
+			</div>
+			{reviewInput !== null && reviewInput !== inputText && (
+				<p role="status" className="text-xs text-warn-text">
+					<Trans>Resume changed since this review. Review these suggestions as out of date or run again.</Trans>
+				</p>
+			)}
+			<details className="text-xs text-ink-3">
+				<summary className="cursor-pointer">
+					<Trans>AI request details</Trans>
+				</summary>
+				<AiResultUsage usage={reviewUsage} />
+			</details>
+			{review.summary && <p className="text-[13px] leading-[18px] text-ink-2">{review.summary}</p>}
+
+			{proposals.length > 0 && (
+				<div className="check-writing-proposals mt-1">
+					<ChangeSet
+						compact
+						untitled
+						proposals={proposals}
+						states={proposals.map((proposal) => getProposalState(data, proposal, applications))}
+						locked={locked}
+						onAccept={(accepted) => {
+							const { applied } = acceptResumeProposals(accepted);
+							setProposalStatus(
+								applied.map((proposal) => proposal.id),
+								"accepted",
+							);
+						}}
+						onReject={(rejected) =>
+							setProposalStatus(
+								rejected.map((proposal) => proposal.id),
+								"rejected",
+							)
+						}
+						onRestore={(restored) =>
+							setProposalStatus(
+								restored.map((proposal) => proposal.id),
+								"pending",
+							)
+						}
+						onSuggestAgain={hasUsableProvider ? run : undefined}
+						onEdit={(proposal, text) => {
+							const edited = editWritingProposal(proposal, text, passages, inputText);
+							useEditorStore.setState((state) => ({
+								proposals: state.proposals.map((current) => (current.id === edited.id ? edited : current)),
+							}));
+							return Promise.resolve();
+						}}
+					/>
+				</div>
+			)}
+
+			{review.notes.map((note) => (
+				<WritingNoteCard key={`${note.location}:${note.note}`} note={note} />
+			))}
+
+			{review.strengths.length > 0 && (
+				<section aria-labelledby="writing-strengths" className="grid gap-1.5">
+					<h3 id="writing-strengths" className="mt-2.5 t-caption text-ink-3">
+						<Trans>What's working</Trans>
+					</h3>
+					<ul className="grid list-disc gap-1 ps-[18px] text-[13px] leading-[18px] text-ink-2">
+						{review.strengths.map((strength) => (
+							<li key={strength}>{strength}</li>
+						))}
+					</ul>
+				</section>
+			)}
+
+			<p className="mt-auto pt-1.5 pb-3 text-xs leading-4 text-ink-3">
+				<Trans>A model's opinion, not a verdict. It can be wrong.</Trans>{" "}
+			</p>
+		</div>
+	);
+}
+
+const impactLabel = (impact: WritingNote["impact"]) => ({ high: t`High`, medium: t`Medium`, low: t`Low` })[impact];
+
+function WritingNoteCard({ note }: { note: WritingNote }) {
+	const breakpoint = useBreakpoint();
+
+	const showOnPage = () => {
+		if (!note.target) return;
+		useEditorStore.setState({ selection: note.target, pageView: "page" });
+		if (breakpoint === "tablet") useEditorStore.setState({ panelHidden: true });
+		if (breakpoint === "mobile") useEditorStore.setState({ mobileView: "page" });
+	};
+
+	return (
+		<article className="grid gap-1 border-b border-line pt-3 pb-1.5">
+			<div className="flex items-center justify-between gap-2">
+				<span className="t-mono text-ink-2">{note.location}</span>
+				<span
+					className={cn(
+						"inline-flex h-5 items-center rounded-xs px-1.5 t-caption",
+						note.impact === "high" ? "bg-warn-soft text-warn-text" : "bg-sunken text-ink-2",
+					)}
+				>
+					{impactLabel(note.impact)}
+				</span>
+			</div>
+			<p className="text-[13px] leading-[18px]">
+				{note.quote && <i className="text-ink-2">“{note.quote}”</i>} {note.note}
+			</p>
+			{note.rewrite && <p className="text-[13px] leading-[18px] text-accent-text">{note.rewrite}</p>}
+			{note.target && (
+				<Button size="sm" variant="ghost" className="-ms-2 w-fit" onClick={showOnPage}>
+					<Trans>Show on page</Trans>
+				</Button>
+			)}
+		</article>
+	);
+}

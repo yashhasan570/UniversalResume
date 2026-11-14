@@ -1,0 +1,8 @@
+{
+	"extends": "@universal-resume/config/tsconfig.base.json",
+	"compilerOptions": {
+		"jsx": "preserve",
+		"lib": ["ESNext", "DOM"]
+	},
+	"include": ["**/*", "../vite.config.ts"]
+}

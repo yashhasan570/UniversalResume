@@ -1,0 +1,26 @@
+# P1 · feedback links that don't open: turned off, expired and unknown links each say so with the web's guidance.
+appId: me.universalresume.storyboard
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible: Open briefing
+    timeout: 30000
+- openLink: me.universalresume.storyboard://feedback/revoked
+- extendedWaitUntil:
+    visible: This link was turned off
+    timeout: 10000
+- assertVisible: Ask the person who sent it for a new link. Comments you left are still with them.
+- openLink: me.universalresume.storyboard://feedback/expired
+- extendedWaitUntil:
+    visible: This link has expired
+    timeout: 10000
+- assertVisible: Ask the person who sent it for a new link. Comments you left are still with them.
+- openLink: me.universalresume.storyboard://feedback/not-a-token
+- extendedWaitUntil:
+    visible: This link doesn't open
+    timeout: 10000
+- assertVisible: Check that you copied the whole link, or ask the person who sent it for a new one.
+- tapOn: Go to Universal Resume
+- waitForAnimationToEnd
+- assertVisible: Open briefing

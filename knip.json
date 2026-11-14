@@ -1,0 +1,103 @@
+{
+	"$schema": "https://unpkg.com/knip@6/schema.json",
+	"tags": ["-lintignore"],
+	"ignoreBinaries": ["pdftotext", "mktemp"],
+	"ignoreIssues": {
+		"apps/mobile/src/**": ["exports", "types", "duplicates"]
+	},
+	"workspaces": {
+		".": {
+			"entry": ["tests/e2e/autofill-prototype.mjs"]
+		},
+		"apps/mobile": {
+			"ignoreExportsUsedInFile": true,
+			"entry": ["plugins/*.js", "scripts/**/*.mjs"],
+			"ignoreDependencies": ["babel-jest", "expo-task-manager", "expo-updates", "uuid"]
+		},
+		"apps/web": {
+			"entry": [
+				"lingui.config.ts",
+				"vitest.config.ts",
+				"vitest.setup.ts",
+				"src/features/homepage/prerender.tsx",
+				"src/features/auth/email-text.ts"
+			],
+			"vite": {
+				"config": []
+			},
+			"vitest": {
+				"config": []
+			}
+		},
+		"apps/server": {
+			"entry": [
+				"vercel.mjs",
+				"src/prepare-deployment.ts",
+				"src/migrate-legacy-styles.ts",
+				"src/cloudflare/index.ts",
+				"src/cloudflare/sharp.ts"
+			],
+			"ignoreDependencies": [
+				"@ai-sdk/anthropic",
+				"@ai-sdk/cerebras",
+				"@ai-sdk/cohere",
+				"@ai-sdk/deepseek",
+				"@ai-sdk/fireworks",
+				"@ai-sdk/google",
+				"@ai-sdk/groq",
+				"@ai-sdk/mistral",
+				"@ai-sdk/openai",
+				"@ai-sdk/openai-compatible",
+				"@ai-sdk/perplexity",
+				"@ai-sdk/togetherai",
+				"@ai-sdk/xai",
+				"@aws-sdk/client-s3",
+				"@better-auth/api-key",
+				"@better-auth/drizzle-adapter",
+				"@better-auth/infra",
+				"@better-auth/passkey",
+				"@bramus/specificity",
+				"@formepdf/react",
+				"@orpc/experimental-ratelimit",
+				"@sindresorhus/slugify",
+				"@t3-oss/env-core",
+				"@uiw/color-convert",
+				"@vercel/blob",
+				"ai",
+				"bcryptjs",
+				"css-tree",
+				"docx",
+				"drizzle-zod",
+				"fast-json-patch",
+				"fast-png",
+				"fflate",
+				"harfbuzzjs",
+				"ioredis",
+				"isbot",
+				"jose",
+				"jsonrepair",
+				"mdast-util-from-markdown",
+				"node-html-parser",
+				"nodemailer",
+				"ollama-ai-provider-v2",
+				"pdfjs-dist",
+				"react-email",
+				"react-reconciler",
+				"resumable-stream",
+				"sanitize-html",
+				"sharp",
+				"tokenx",
+				"ts-pattern",
+				"unique-names-generator",
+				"uuid"
+			]
+		},
+		"tooling": {
+			"entry": ["**/*.mjs"],
+			"ignoreDependencies": ["@formepdf/core", "@orpc/client", "css-tree"]
+		},
+		"packages/api": {
+			"ignoreDependencies": ["ioredis"]
+		}
+	}
+}

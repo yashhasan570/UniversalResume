@@ -1,0 +1,6 @@
+{
+	"extends": "@universal-resume/config/tsconfig.base.json",
+	"compilerOptions": {
+		"lib": ["ESNext", "DOM", "DOM.Iterable"]
+	}
+}

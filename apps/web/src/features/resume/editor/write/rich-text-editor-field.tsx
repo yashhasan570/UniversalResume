@@ -1,0 +1,691 @@
+import type { ImproveLine } from "./improve";
+import type { ImproveKind } from "./improve";
+import type { Menu } from "@base-ui/react/menu";
+import type { IconName } from "@universal-resume/ui/components/icon";
+import type { Editor } from "@tiptap/react";
+import type { ReactNode } from "react";
+import { Toolbar } from "@base-ui/react/toolbar";
+import { t } from "@lingui/core/macro";
+import { Plural, Trans } from "@lingui/react/macro";
+import { NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+	DropdownMenu,
+	DropdownMenuCheckboxItem,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuLabel,
+	DropdownMenuGroup,
+	DropdownMenuRadioGroup,
+	DropdownMenuRadioItem,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "@universal-resume/ui/components/dropdown-menu";
+import { Icon } from "@universal-resume/ui/components/icon";
+import { useBreakpoint } from "@universal-resume/ui/hooks/use-breakpoint";
+import { useKeyboardInset } from "@universal-resume/ui/hooks/use-keyboard-inset";
+import { cn } from "@universal-resume/utils/style";
+import { ImprovePanel, lineAtCaret } from "./improve";
+import { acceptImproveLine, improveSourceChanges } from "./improve-history";
+import { cleanPastedHtml } from "@/components/input/pasted-html";
+import { richTextExtensions } from "@/components/input/rich-text-extensions";
+import { hasUnsupportedTableMarkup, toPreviewHtml } from "@/components/input/rich-text-markup";
+import { AiProviderLoadState } from "@/features/settings/integrations/ai-provider-load-state";
+import { useHasUsableAiProvider } from "@/features/settings/integrations/hooks/use-has-usable-ai-provider";
+import { usePrompt } from "@/hooks/use-confirm";
+
+type ToolbarAction = {
+	icon: IconName;
+	label: string;
+	isActive?: (editor: Editor) => boolean;
+	run: (editor: Editor) => void;
+};
+
+/**
+ * Bold, Italic, Underline, Link, then lists; the rarer formatting (strikethrough, code, highlight, colour,
+ * alignment, headings, indent, a rule and Clear formatting) sits in one menu so the toolbar fits a narrow column.
+ */
+
+/** An address as typed, with `https://` when it names no scheme ("priya.dev"); mailto:, tel: and the rest stay. */
+const withLinkScheme = (address: string) =>
+	/^[a-z][a-z\d+.-]*:/i.test(address) || address.startsWith("#") ? address : `https://${address}`;
+
+function useToolbarActions(): ToolbarAction[] {
+	const prompt = usePrompt();
+
+	return [
+		{
+			icon: "text-b",
+			label: t`Bold`,
+			isActive: (editor) => editor.isActive("bold"),
+			run: (editor) => editor.chain().focus().toggleBold().run(),
+		},
+		{
+			icon: "text-italic",
+			label: t`Italic`,
+			isActive: (editor) => editor.isActive("italic"),
+			run: (editor) => editor.chain().focus().toggleItalic().run(),
+		},
+		{
+			icon: "text-underline",
+			label: t`Underline`,
+			isActive: (editor) => editor.isActive("underline"),
+			run: (editor) => editor.chain().focus().toggleUnderline().run(),
+		},
+		{
+			icon: "link-simple-horizontal",
+			label: t`Link`,
+			isActive: (editor) => editor.isActive("link"),
+			run: async (editor) => {
+				const current = (editor.getAttributes("link").href as string | undefined) ?? "";
+				const href = await prompt(t`Link address`, {
+					defaultValue: current || "https://",
+					description: t`Leave it empty to remove the link.`,
+					confirmText: current ? t`Save link` : t`Add link`,
+				});
+				if (href === null) return editor.commands.focus();
+				const chain = editor.chain().focus().extendMarkRange("link");
+				const address = href.trim();
+				if (!address || address === "https://") chain.unsetLink().run();
+				// "priya.dev" would be a relative link, broken in the PDF: an address without a scheme is a web address.
+				else chain.setLink({ href: withLinkScheme(address) }).run();
+			},
+		},
+		{
+			icon: "list-bullets",
+			label: t`Bulleted list`,
+			isActive: (editor) => editor.isActive("bulletList"),
+			run: (editor) => editor.chain().focus().toggleBulletList().run(),
+		},
+		{
+			icon: "list-numbers",
+			label: t`Numbered list`,
+			isActive: (editor) => editor.isActive("orderedList"),
+			run: (editor) => editor.chain().focus().toggleOrderedList().run(),
+		},
+	];
+}
+
+// The first list button starts a new group in the toolbar.
+
+const ALIGNMENTS = ["left", "center", "right", "justify"] as const;
+type Alignment = (typeof ALIGNMENTS)[number];
+const ALIGNMENT_ICONS: Record<Alignment, IconName> = {
+	left: "text-align-left",
+	center: "text-align-center",
+	right: "text-align-right",
+	justify: "text-align-justify",
+};
+
+// Dark enough to read on white paper; "" is the template's own text colour.
+const TEXT_COLORS = ["", "#dc2626", "#ea580c", "#16a34a", "#2563eb", "#7c3aed", "#6b7280"] as const;
+
+type FormattingState = {
+	align: Alignment;
+	strike: boolean;
+	code: boolean;
+	highlight: boolean;
+	/** 0 for a paragraph, else the heading level. */
+	block: number;
+	color: string;
+};
+
+const readFormatting = (editor: Editor): FormattingState => ({
+	align: ALIGNMENTS.find((align) => align !== "left" && editor.isActive({ textAlign: align })) ?? "left",
+	strike: editor.isActive("strike"),
+	code: editor.isActive("code"),
+	highlight: editor.isActive("highlight"),
+	block: [1, 2, 3].find((level) => editor.isActive("heading", { level })) ?? 0,
+	color: (editor.getAttributes("textStyle").color as string | undefined) ?? "",
+});
+
+const DEFAULT_FORMATTING: FormattingState = {
+	align: "left",
+	strike: false,
+	code: false,
+	highlight: false,
+	block: 0,
+	color: "",
+};
+
+/**
+ * Keeps the toolbar up while one of its menus is open and returns the caret to the text when it closes; a click
+ * outside the open menu leaves the field, like a click outside the toolbar.
+ */
+function useToolbarMenus(editor: Editor | null, onLeave: () => void) {
+	const [openMenus, setOpenMenus] = useState<Record<string, boolean>>({});
+	const leaving = useRef(false);
+
+	const rootProps = (menu: string) => ({
+		modal: false,
+		onOpenChange: (next: boolean, details: Menu.Root.ChangeEventDetails) => {
+			setOpenMenus((current) => ({ ...current, [menu]: next }));
+			leaving.current = !next && (details.reason === "outside-press" || details.reason === "focus-out");
+			if (leaving.current) onLeave();
+		},
+	});
+	const contentProps = {
+		"data-toolbar-menu": "",
+		finalFocus: () => (leaving.current ? false : (editor?.view.dom ?? true)),
+	};
+	return { open: Object.values(openMenus).some(Boolean), rootProps, contentProps };
+}
+
+/** Where a click on the read-only preview landed, or "end" when focus arrived another way. */
+export type FocusRequest = { x: number; y: number } | "end" | undefined;
+
+export type RichTextEditorProps = {
+	/** Accessible name of the text box. */
+	label: string;
+	value: string;
+	onChange: (
+		html: string,
+		options?: {
+			newStep?: boolean;
+			aiOperationIds?: string[] | undefined;
+			removedAiOperationIds?: string[] | undefined;
+		},
+	) => void;
+	/** Guidance under the text while editing, e.g. "2–3 sentences reads best". */
+	hint?: ReactNode;
+	placeholder?: string;
+	disabled?: boolean;
+	className?: string;
+	/** The text area's id, so other controls can focus it. */
+	id?: string;
+	/** Replaces the text area's default height (44px to 360px). */
+	heightClassName?: string;
+	/** Improve's presets for a cover letter's body, instead of the resume ones. */
+	improve?: ImproveKind | undefined;
+	/** Private text (the resume's notes): bold, italic, list and link only; no Improve, formatting menus or footer. */
+	compact?: boolean;
+};
+
+const COMPACT_ACTIONS = ["text-b", "text-italic", "list-bullets", "link-simple-horizontal"] as const;
+
+/**
+ * Loaded on demand by ./rich-text-editor.tsx, which keeps Tiptap out of the builder's first render.
+ *
+ * Rich text for descriptions: empty desktop fields keep formatting visible; otherwise focus shows it. The toolbar never
+ * takes focus from it, and Markdown shortcuts work ("- " starts a list, "**bold**").
+ */
+export function RichTextEditor({
+	label,
+	value,
+	onChange,
+	hint,
+	placeholder,
+	disabled = false,
+	className,
+	id,
+	heightClassName = "max-h-[360px] min-h-11",
+	focusRequest,
+	improve,
+	compact = false,
+}: RichTextEditorProps & { focusRequest?: FocusRequest }) {
+	const [focused, setFocused] = useState(false);
+	const toolbar = useRef<HTMLDivElement>(null);
+	const [improving, setImproving] = useState<ImproveLine | null>(null);
+	const allActions = useToolbarActions();
+	const actions = compact
+		? COMPACT_ACTIONS.flatMap((icon) => allActions.filter((action) => action.icon === icon))
+		: allActions;
+	const ai = useHasUsableAiProvider();
+	const mobile = useBreakpoint() === "mobile";
+	const keyboardInset = useKeyboardInset();
+	const acceptedReplacement = useRef<Parameters<RichTextEditorProps["onChange"]>[1]>(undefined);
+	const readOnlyTable = useMemo(() => hasUnsupportedTableMarkup(value), [value]);
+	const editorValue = useMemo(() => (readOnlyTable ? toPreviewHtml(value) : value), [readOnlyTable, value]);
+
+	// ⌘K / Ctrl+K adds a link here, as in most writing tools, instead of opening the command palette.
+	const linkShortcut = useRef<(() => void) | null>(null);
+	const editor = useEditor({
+		extensions: richTextExtensions,
+		content: editorValue,
+		editable: !disabled && !readOnlyTable,
+		immediatelyRender: false,
+		shouldRerenderOnTransaction: false,
+		editorProps: {
+			handleKeyDown: (view, event) => {
+				if (event.key === "Tab") {
+					// Commit the live range before focus leaves: the browser's selectionchange can still be queued.
+					const range = view.dom.ownerDocument.getSelection();
+					if (
+						range?.anchorNode &&
+						range.focusNode &&
+						view.dom.contains(range.anchorNode) &&
+						view.dom.contains(range.focusNode)
+					) {
+						const anchor = view.posAtDOM(range.anchorNode, range.anchorOffset);
+						const head = view.posAtDOM(range.focusNode, range.focusOffset);
+						const current = view.state.selection;
+						const sameNode =
+							current instanceof NodeSelection &&
+							Math.min(anchor, head) === current.from &&
+							Math.max(anchor, head) === current.to;
+						if (!sameNode) {
+							const selection = TextSelection.between(view.state.doc.resolve(anchor), view.state.doc.resolve(head));
+							if (!selection.eq(current)) view.dispatch(view.state.tr.setSelection(selection));
+						}
+					}
+					return false;
+				}
+				const mod = event.metaKey || event.ctrlKey;
+				if (!mod || event.altKey || event.shiftKey || event.key.toLowerCase() !== "k" || !linkShortcut.current)
+					return false;
+				event.preventDefault();
+				event.stopPropagation();
+				linkShortcut.current();
+				return true;
+			},
+			transformPastedHTML: (pasted) => {
+				const html = cleanPastedHtml(pasted);
+				return hasUnsupportedTableMarkup(html) ? toPreviewHtml(html) : html;
+			},
+			attributes: {
+				...(id ? { id } : {}),
+				"aria-label": label,
+				"aria-multiline": "true",
+				role: "textbox",
+				spellcheck: "true",
+				class: cn(
+					"typeset typeset-field overflow-y-auto px-3 py-2 text-sm outline-none [&_li]:my-1.5 [&_li]:ps-0 [&_li>p]:my-0 [&_ol]:ps-[14px] [&_ol]:pe-0 [&_ul]:ps-[14px] [&_ul]:pe-0",
+					heightClassName,
+					"[&_[data-resume-whitespace=preserve]]:whitespace-pre-wrap",
+				),
+			},
+		},
+		onTransaction: ({ editor, transaction }) => {
+			const sources = improveSourceChanges(transaction);
+			if (!sources || transaction.getMeta("preventUpdate") || !transaction.before.eq(editor.state.doc)) return;
+			acceptedReplacement.current = undefined;
+			onChange(editor.getHTML(), sources);
+		},
+		onUpdate: ({ editor, transaction }) => {
+			const options = improveSourceChanges(transaction) ?? acceptedReplacement.current;
+			acceptedReplacement.current = undefined;
+			onChange(editor.getHTML(), options);
+		},
+	});
+
+	const state = useEditorState({
+		editor,
+		selector: ({ editor }) =>
+			editor
+				? {
+						characters: editor.getText().length,
+						active: actions.map((action) => action.isActive?.(editor) ?? false),
+						canImprove: lineAtCaret(editor) !== null,
+						formatting: readFormatting(editor),
+					}
+				: { characters: 0, active: [] as boolean[], canImprove: false, formatting: DEFAULT_FORMATTING },
+	});
+	const characters = editor?.getText().length ?? 0;
+	const menus = useToolbarMenus(editor, () => setFocused(false));
+	useEffect(() => {
+		const link = actions.find((action) => action.icon === "link-simple-horizontal");
+		linkShortcut.current =
+			editor && link
+				? () => {
+						if (editor.isEditable) link.run(editor);
+					}
+				: null;
+	}, [actions, editor]);
+
+	// Undo, the page and the assistant change the text from outside; keep the editor in step.
+	useEffect(() => {
+		if (!editor || editor.getHTML() === editorValue) return;
+		editor.commands.setContent(editorValue, { emitUpdate: false });
+	}, [editor, editorValue]);
+
+	useEffect(() => {
+		editor?.setEditable(!disabled && !readOnlyTable, false);
+	}, [editor, disabled, readOnlyTable]);
+
+	// The preview took a click or focus while the editor loaded: put the caret there, after the editor's first paint.
+	useEffect(() => {
+		if (!editor || !focusRequest) return;
+		const frame = requestAnimationFrame(() => {
+			const at = focusRequest === "end" ? null : editor.view.posAtCoords({ left: focusRequest.x, top: focusRequest.y });
+			editor.commands.focus(at?.pos ?? "end");
+		});
+		return () => cancelAnimationFrame(frame);
+	}, [editor, focusRequest]);
+
+	useEffect(() => {
+		if (!editor || !improving) return;
+		const key = new PluginKey("improve-line");
+		editor.registerPlugin(
+			new Plugin({
+				key,
+				props: {
+					decorations: ({ doc }) => {
+						const { from, to, text } = improving;
+						if (to > doc.content.size || doc.textBetween(from, to) !== text) return null;
+						return DecorationSet.create(doc, [Decoration.node(from - 1, to + 1, { class: "bg-accent-soft" })]);
+					},
+				},
+			}),
+		);
+		return () => {
+			editor.unregisterPlugin(key);
+		};
+	}, [editor, improving]);
+
+	const editing = focused || improving !== null || menus.open;
+
+	const acceptImprove = (line: ImproveLine, text: string, aiOperationIds?: string[]) => {
+		if (!editor?.isEditable || editor.state.doc.textBetween(line.from, line.to) !== line.text) return;
+		acceptedReplacement.current = { newStep: true, aiOperationIds };
+		acceptImproveLine(editor, line, text, aiOperationIds);
+		// Identical wording can still have an accepted source; Tiptap emits no content update in that case.
+		if (acceptedReplacement.current) {
+			const options = acceptedReplacement.current;
+			acceptedReplacement.current = undefined;
+			onChange(editor.getHTML(), options);
+		}
+	};
+
+	const startImprove = () => {
+		if (!editor || ai.isUnavailable) return;
+		// Without a provider, the assistant's inline setup connects one.
+		setImproving(lineAtCaret(editor));
+	};
+
+	// Smaller buttons in a narrow field (the builder sidebar), so the toolbar stays one row under the text.
+	const buttonSize = mobile ? "size-11" : "size-[26px] [--icon-size:16px]";
+	const toolbarButtons = (
+		<>
+			{actions.map((action, index) => (
+				<Toolbar.Button
+					key={action.icon}
+					type="button"
+					aria-label={action.label}
+					aria-pressed={action.isActive ? (state?.active[index] ?? false) : undefined}
+					title={action.label}
+					// Keep the caret in the text while formatting.
+					onMouseDown={(event) => event.preventDefault()}
+					onClick={() => editor && void action.run(editor)}
+					className={cn(toolbarButtonClassName, buttonSize, state?.active[index] && "bg-accent-soft text-accent-text")}
+				>
+					<Icon name={action.icon} />
+				</Toolbar.Button>
+			))}
+			{editor && !compact && (
+				<FormattingMenus
+					editor={editor}
+					formatting={state?.formatting ?? DEFAULT_FORMATTING}
+					buttonClassName={cn(toolbarButtonClassName, buttonSize)}
+					side={mobile ? "top" : "bottom"}
+					menus={menus}
+				/>
+			)}
+			{!compact && (
+				<Toolbar.Button
+					type="button"
+					aria-expanded={improving !== null}
+					disabled={ai.isUnavailable || !characters || (!state?.canImprove && improving === null)}
+					title={state?.canImprove ? undefined : t`Put the caret in a line to improve it`}
+					onMouseDown={(event) => event.preventDefault()}
+					onClick={() => (improving ? setImproving(null) : startImprove())}
+					className={cn(
+						"ms-auto flex shrink-0 items-center gap-1.5 rounded-sm bg-surface px-2 text-[13px] font-medium text-ink-2 shadow-[inset_0_0_0_1px_var(--line-2)] transition-colors duration-quick hover:bg-hover disabled:opacity-45",
+						mobile ? "h-11" : "h-7",
+					)}
+				>
+					<Icon name="sparkle" size={16} />
+					{/* Icon only where the toolbar is narrow, so the formatting buttons keep one row. */}
+					<span>
+						<Trans>Improve</Trans>
+					</span>
+				</Toolbar.Button>
+			)}
+		</>
+	);
+
+	const footer = (
+		<div className="flex items-center justify-between gap-3 border-t border-line px-3 py-1.5 text-xs text-ink-3">
+			<span>{hint ?? <Trans>Markdown shortcuts on</Trans>}</span>
+			<span className="font-mono">
+				<Plural value={characters} one="# character" other="# characters" />
+			</span>
+		</div>
+	);
+
+	return (
+		<>
+			<div
+				onFocus={() => setFocused(true)}
+				onBlur={(event) => {
+					const next = event.relatedTarget;
+					// Opening a toolbar menu moves focus into it; the menu reports leaving the field itself.
+					const inMenu = next instanceof Element && next.closest("[data-toolbar-menu]") !== null;
+					if (!event.currentTarget.contains(next) && !toolbar.current?.contains(next) && !inMenu) setFocused(false);
+				}}
+				className={cn(
+					"@container flex flex-col overflow-hidden rounded-md border border-control-border bg-raised transition-[border-color,box-shadow] duration-quick",
+					editing && "border-accent shadow-[0_0_0_3px_var(--accent-soft)]",
+					disabled && "bg-sunken",
+					className,
+				)}
+			>
+				{readOnlyTable && (
+					<p role="status" className="border-b border-line px-3 py-2 text-xs text-ink-2">
+						<Trans>
+							Original table formatting is preserved. This content is read-only because it cannot be edited safely.
+						</Trans>
+					</p>
+				)}
+
+				<div className="relative">
+					<EditorContent editor={editor} />
+					{placeholder && editor && editor.getText().length === 0 && (
+						<span aria-hidden="true" className="pointer-events-none absolute start-3 top-2 text-sm/5 text-ink-3">
+							{placeholder}
+						</span>
+					)}
+				</div>
+				{/* Formatting sits above the focused text; keyboard and menu actions keep its selection. */}
+				{(editing || (!disabled && characters === 0)) && !readOnlyTable && !mobile && (
+					<Toolbar.Root
+						ref={toolbar}
+						aria-label={t`Formatting`}
+						className="order-first flex gap-0 border-b border-line px-1 py-1"
+					>
+						{toolbarButtons}
+					</Toolbar.Root>
+				)}
+
+				{/* On phones the toolbar docks above the keyboard, with Done to put the keyboard away. */}
+				{editing && !readOnlyTable && mobile && (
+					<Toolbar.Root
+						ref={toolbar}
+						aria-label={t`Formatting`}
+						style={{ bottom: keyboardInset }}
+						className="fixed inset-x-0 z-50 flex h-11 items-center gap-0.5 border-t border-line bg-raised px-1.5 shadow-e2"
+					>
+						<div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">{toolbarButtons}</div>
+						<Toolbar.Button
+							type="button"
+							onMouseDown={(event) => event.preventDefault()}
+							onClick={() => {
+								setImproving(null);
+								setFocused(false);
+								editor?.commands.blur();
+							}}
+							className="flex h-11 shrink-0 items-center rounded-md px-3 text-sm font-semibold text-accent-text"
+						>
+							<Trans>Done</Trans>
+						</Toolbar.Button>
+					</Toolbar.Root>
+				)}
+
+				{editing && <AiProviderLoadState state={ai} />}
+				{/* Room for the docked toolbar, so the end of the text and its hints can scroll clear of it. */}
+				{editing && !readOnlyTable && mobile && <div aria-hidden="true" className="h-11" />}
+
+				{editing && !improving && !!characters && !compact && footer}
+			</div>
+			{!editing && !disabled && characters === 0 && !mobile && !compact && (
+				<p className="mt-2 text-xs/4 text-ink-3">
+					<Trans>Improve works on a line once you have written one.</Trans>
+				</p>
+			)}
+			{editor && improving && (
+				<ImprovePanel
+					key={improving.from}
+					editor={editor}
+					line={improving}
+					where={label}
+					onClose={() => setImproving(null)}
+					onAccept={(text, aiOperationIds) => acceptImprove(improving, text, aiOperationIds)}
+					kind={improve}
+				/>
+			)}
+			{editing && improving && footer}
+		</>
+	);
+}
+
+const toolbarButtonClassName =
+	"flex shrink-0 items-center justify-center rounded-md text-ink-2 transition-colors duration-quick hover:bg-hover data-popup-open:bg-hover";
+
+type FormattingMenusProps = {
+	editor: Editor;
+	formatting: FormattingState;
+	buttonClassName: string;
+	side: "top" | "bottom";
+	menus: ReturnType<typeof useToolbarMenus>;
+};
+
+/** Everything the toolbar has no room for, alignment included, in one "More formatting" menu. */
+function FormattingMenus({ editor, formatting, buttonClassName, side, menus }: FormattingMenusProps) {
+	const chain = () => editor.chain().focus();
+	const alignLabels: Record<Alignment, string> = {
+		left: t`Align left`,
+		center: t`Align center`,
+		right: t`Align right`,
+		justify: t`Justify`,
+	};
+	const colorLabels: Record<(typeof TEXT_COLORS)[number], string> = {
+		"": t`Default`,
+		"#dc2626": t`Red`,
+		"#ea580c": t`Orange`,
+		"#16a34a": t`Green`,
+		"#2563eb": t`Blue`,
+		"#7c3aed": t`Purple`,
+		"#6b7280": t`Gray`,
+	};
+	const blocks = [
+		{ level: 0, icon: "paragraph", label: t`Paragraph` },
+		{ level: 1, icon: "text-h-one", label: t`Heading 1` },
+		{ level: 2, icon: "text-h-two", label: t`Heading 2` },
+		{ level: 3, icon: "text-h-three", label: t`Heading 3` },
+	] as const;
+	const setBlock = (level: number) =>
+		level === 0
+			? chain().setParagraph().run()
+			: chain()
+					.setHeading({ level: level as 1 | 2 | 3 })
+					.run();
+
+	return (
+		<>
+			<DropdownMenu {...menus.rootProps("more")}>
+				<Toolbar.Button
+					render={<DropdownMenuTrigger />}
+					aria-label={t`More formatting`}
+					title={t`More formatting`}
+					className={buttonClassName}
+				>
+					<Icon name="dots-three" />
+				</Toolbar.Button>
+				<DropdownMenuContent side={side} className="w-56" {...menus.contentProps}>
+					<DropdownMenuCheckboxItem checked={formatting.strike} onCheckedChange={() => chain().toggleStrike().run()}>
+						<Icon name="text-strikethrough" />
+						<Trans>Strikethrough</Trans>
+					</DropdownMenuCheckboxItem>
+					<DropdownMenuCheckboxItem checked={formatting.code} onCheckedChange={() => chain().toggleCode().run()}>
+						<Icon name="code" />
+						<Trans>Code</Trans>
+					</DropdownMenuCheckboxItem>
+					<DropdownMenuCheckboxItem
+						checked={formatting.highlight}
+						onCheckedChange={() => chain().toggleHighlight().run()}
+					>
+						<Icon name="highlighter" />
+						<Trans>Highlight</Trans>
+					</DropdownMenuCheckboxItem>
+
+					<DropdownMenuGroup>
+						<DropdownMenuLabel>
+							<Trans>Text color</Trans>
+						</DropdownMenuLabel>
+						<div className="flex gap-1.5 px-2.5 pt-0.5 pb-2">
+							{TEXT_COLORS.map((color) => (
+								<button
+									key={color || "default"}
+									type="button"
+									aria-label={colorLabels[color]}
+									aria-pressed={formatting.color === color}
+									className="size-6 rounded-full border border-line-2 aria-pressed:outline-2 aria-pressed:outline-offset-2 aria-pressed:outline-ink"
+									style={{ background: color || "var(--ink)" }}
+									onClick={() => (color ? chain().setColor(color).run() : chain().unsetColor().run())}
+								/>
+							))}
+						</div>
+					</DropdownMenuGroup>
+					<DropdownMenuRadioGroup
+						value={formatting.align}
+						onValueChange={(align: Alignment) =>
+							align === "left" ? chain().unsetTextAlign().run() : chain().setTextAlign(align).run()
+						}
+					>
+						<DropdownMenuLabel>
+							<Trans>Text alignment</Trans>
+						</DropdownMenuLabel>
+						{ALIGNMENTS.map((align) => (
+							<DropdownMenuRadioItem key={align} value={align}>
+								<Icon name={ALIGNMENT_ICONS[align]} />
+								{alignLabels[align]}
+							</DropdownMenuRadioItem>
+						))}
+					</DropdownMenuRadioGroup>
+					<DropdownMenuRadioGroup value={formatting.block} onValueChange={(level: number) => setBlock(level)}>
+						<DropdownMenuLabel>
+							<Trans>Text style</Trans>
+						</DropdownMenuLabel>
+						{blocks.map((block) => (
+							<DropdownMenuRadioItem key={block.level} value={block.level}>
+								<Icon name={block.icon} />
+								<span>{block.label}</span>
+							</DropdownMenuRadioItem>
+						))}
+					</DropdownMenuRadioGroup>
+
+					<DropdownMenuSeparator />
+					<DropdownMenuItem onClick={() => chain().increaseIndent().run()}>
+						<Icon name="text-indent" />
+						<Trans>Indent</Trans>
+					</DropdownMenuItem>
+					<DropdownMenuItem onClick={() => chain().decreaseIndent().run()}>
+						<Icon name="text-outdent" />
+						<Trans>Outdent</Trans>
+					</DropdownMenuItem>
+					<DropdownMenuItem onClick={() => chain().setHorizontalRule().run()}>
+						<Icon name="minus" />
+						<Trans>Horizontal line</Trans>
+					</DropdownMenuItem>
+
+					<DropdownMenuSeparator />
+					<DropdownMenuItem onClick={() => chain().clearNodes().unsetAllMarks().unsetTextAlign().run()}>
+						<Icon name="text-t-slash" />
+						<Trans>Clear formatting</Trans>
+					</DropdownMenuItem>
+				</DropdownMenuContent>
+			</DropdownMenu>
+		</>
+	);
+}

@@ -1,0 +1,667 @@
+import type { ApplicationSummary } from "../types";
+import type { InterviewKind, InterviewTimelineEntry } from "@universal-resume/schema/applications/data";
+import { i18n } from "@lingui/core";
+import { t } from "@lingui/core/macro";
+import { Trans } from "@lingui/react/macro";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { m } from "motion/react";
+import { useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { interviewDetailsSchema, nextInterviewKind } from "@universal-resume/schema/applications/data";
+import { Button } from "@universal-resume/ui/components/button";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@universal-resume/ui/components/dialog";
+import { Icon } from "@universal-resume/ui/components/icon";
+import { IconButton } from "@universal-resume/ui/components/icon-button";
+import { Input } from "@universal-resume/ui/components/input";
+import { Label } from "@universal-resume/ui/components/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@universal-resume/ui/components/popover";
+import { SegmentedControl, SegmentedControlItem } from "@universal-resume/ui/components/segmented-control";
+import { toast } from "@universal-resume/ui/components/toast";
+import { generateId } from "@universal-resume/utils/string";
+import { cn } from "@universal-resume/utils/style";
+import { fromZonedDateTime } from "@universal-resume/utils/timezone";
+import { interviewCalendarAction, showInterviewCancellation } from "../calendar";
+import { dayKey, interviewTypeLabel } from "../interviews";
+import { applicationDetailQueryOptions, applicationsListQueryKey } from "../queries";
+import { DateField } from "./date-field";
+import { Combobox } from "@/components/ui/combobox";
+import { useCareerTime, withQueryUndo } from "@/features/career/shared";
+import { useClosingValue } from "@/hooks/use-closing-value";
+import { getAccountGeneration } from "@/libs/auth/account-scope";
+import { D2, EASE } from "@/libs/motion";
+import { client, orpc, prepareRpc } from "@/libs/orpc/client";
+
+export { interviewTypeLabel } from "../interviews";
+
+const KINDS: InterviewKind[] = ["screening", "technical", "behavioral", "onsite", "other"];
+const LENGTHS = [30, 45, 60, 90];
+
+// ---- Wall-clock time in a named timezone ----
+
+const zoneFormatter = (timeZone: string) =>
+	new Intl.DateTimeFormat("en-CA", {
+		timeZone,
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+		hourCycle: "h23",
+	});
+
+/** A time zone as people read it: "America/New_York" is "America/New York", as the zone picker lists it. */
+/** "Europe/Lisbon" reads as "Lisbon". */
+const timeZoneName = (zone: string) => (zone.split("/").at(-1) ?? zone).replaceAll("_", " ");
+
+/** An instant as the date ("2026-10-08") and time ("17:58") on a clock in `timeZone`. */
+function zonedParts(instant: Date | string, timeZone: string) {
+	const parts = Object.fromEntries(
+		zoneFormatter(timeZone)
+			.formatToParts(new Date(instant))
+			.map(({ type, value }) => [type, value]),
+	);
+	return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}` };
+}
+
+const isTimeZone = (value: string) => {
+	try {
+		new Intl.DateTimeFormat("en", { timeZone: value });
+		return true;
+	} catch {
+		return false;
+	}
+};
+
+type Draft = {
+	applicationId: string;
+	kind: InterviewKind;
+	date: string;
+	time: string;
+	durationMinutes: number;
+	location: string;
+	notes: string;
+	/** Not shown any more; kept so saving doesn't reset it. */
+	audience: InterviewTimelineEntry["audience"];
+	timezone: string;
+	participants: { id: string; name: string; role: string; profileUrl: string }[];
+};
+
+// New interviews default to the given day (or tomorrow) at 09:00 in the timezone, or the next full hour if that's past.
+/** The likely next interview type for this application (see {@link nextInterviewKind}). */
+function suggestedKind(application: ApplicationSummary | null | undefined): InterviewKind {
+	if (!application) return "screening";
+	const kinds = application.activity.flatMap((entry) => (entry.type === "interview" ? [entry.kind] : []));
+	return nextInterviewKind(kinds, application.status === "interview" || application.status === "offer");
+}
+
+function emptyDraft(
+	applicationId: string,
+	timezone: string,
+	day?: string | null,
+	kind: InterviewKind = "screening",
+): Draft {
+	const now = new Date();
+	const today = new Date(`${dayKey(now, timezone)}T00:00:00Z`);
+	const date = day ?? dayKey(new Date(today.getTime() + 86_400_000), "UTC");
+	let at = fromZonedDateTime(date, "09:00", timezone) ?? now;
+	if (at <= now) at = new Date(Math.ceil(now.getTime() / 3_600_000) * 3_600_000);
+	return {
+		applicationId,
+		kind,
+		...zonedParts(at, timezone),
+		durationMinutes: 60,
+		location: "",
+		notes: "",
+		audience: "other",
+		timezone,
+		participants: [],
+	};
+}
+
+const draftFrom = (applicationId: string, interview: InterviewTimelineEntry, fallbackZone: string): Draft => {
+	const timezone = interview.timezone && isTimeZone(interview.timezone) ? interview.timezone : fallbackZone;
+	return {
+		applicationId,
+		kind: interview.kind,
+		...zonedParts(interview.at, timezone),
+		durationMinutes: interview.durationMinutes,
+		location: interview.location,
+		notes: interview.notes,
+		audience: interview.audience ?? "other",
+		timezone,
+		participants: (interview.participants ?? []).map((participant) => ({
+			id: generateId(),
+			name: participant.name,
+			role: participant.role,
+			profileUrl: participant.profileUrl ?? "",
+		})),
+	};
+};
+
+type InterviewDialogProps = {
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+	// The application the interview belongs to. When omitted, an application picker is shown
+	// (used by the calendar, where no application is selected yet).
+	application?: ApplicationSummary | null;
+	// Applications offered by the picker when `application` is omitted.
+	applications?: ApplicationSummary[];
+	// Set when editing an existing interview.
+	interview?: InterviewTimelineEntry | null;
+	// Pre-selects this day when scheduling (e.g. a day clicked on the calendar).
+	day?: string | null;
+	/**
+	 * Draws the form in place of the surface it opens from (the Details sheet) instead of in a dialog on top of it.
+	 * Closing returns to that surface.
+	 */
+	inline?: boolean;
+};
+
+/** W20: type, time, length, people and what they asked for. Date and time are wall-clock in the interview's timezone. */
+export function InterviewDialog({
+	open,
+	onOpenChange,
+	application,
+	applications = [],
+	interview,
+	day,
+	inline = false,
+}: InterviewDialogProps) {
+	const queryClient = useQueryClient();
+	const { when, timeZone: preferredZone } = useCareerTime();
+	const id = useId();
+	// Held through the closing animation, so the title and Delete don't flip while it fades.
+	const [closingInterview, onOpenChangeComplete] = useClosingValue(interview ?? null);
+	// In place there is no closing animation to hold through.
+	const editing = inline ? (interview ?? null) : closingInterview;
+	const [draft, setDraft] = useState<Draft>(() =>
+		interview
+			? draftFrom(application?.id ?? "", interview, preferredZone)
+			: emptyDraft(application?.id ?? "", preferredZone, day, suggestedKind(application)),
+	);
+	const [otherZone, setOtherZone] = useState(false);
+	// In place, the form's title takes focus as a dialog's would.
+	useLayoutEffect(() => {
+		if (inline && open) document.getElementById(`${id}-title`)?.focus();
+	}, [inline, open, id]);
+	const activeForm = useRef<symbol | null>(null);
+	useLayoutEffect(() => {
+		activeForm.current = Symbol();
+		return () => {
+			activeForm.current = null;
+		};
+	}, [open, draft.applicationId, interview?.id]);
+
+	// A fresh draft each time the dialog opens, adjusted during render so the first frame is never stale.
+	const [wasOpen, setWasOpen] = useState(open);
+	if (open !== wasOpen) {
+		setWasOpen(open);
+		if (open) {
+			const applicationId = application?.id ?? "";
+			setDraft(
+				interview
+					? draftFrom(applicationId, interview, preferredZone)
+					: emptyDraft(applicationId, preferredZone, day, suggestedKind(application)),
+			);
+			setOtherZone(false);
+		}
+	}
+
+	const invalidate = (applicationId: string) => {
+		void queryClient.invalidateQueries({ queryKey: applicationsListQueryKey() });
+		void queryClient.invalidateQueries({
+			queryKey: orpc.applications.getById.queryKey({ input: { id: applicationId } }),
+		});
+	};
+
+	const add = useMutation(
+		orpc.applications.addInterview.mutationOptions({
+			onError: () => toast.add({ type: "error", description: t`Couldn't schedule the interview. Try again.` }),
+		}),
+	);
+	const update = useMutation(
+		orpc.applications.updateInterview.mutationOptions({
+			onError: () => toast.add({ type: "error", description: t`Couldn't update the interview. Try again.` }),
+		}),
+	);
+
+	const zones = useMemo(() => {
+		const all = Intl.supportedValuesOf("timeZone");
+		return all.includes(draft.timezone) ? all : [draft.timezone, ...all];
+	}, [draft.timezone]);
+
+	const pending = add.isPending || update.isPending;
+	const original = editing ? zonedParts(editing.at, draft.timezone) : null;
+	// Keep the exact stored instant when the clock time is unchanged, including during a DST overlap.
+	const at =
+		editing && original?.date === draft.date && original.time === draft.time
+			? new Date(editing.at)
+			: draft.date && draft.time
+				? fromZonedDateTime(draft.date, draft.time, draft.timezone)
+				: null;
+	const details = interviewDetailsSchema.safeParse({
+		...draft,
+		participants: draft.participants
+			.filter(({ name }) => name.trim())
+			.map(({ name, role, profileUrl }) => ({
+				name,
+				role,
+				...(profileUrl.trim() ? { profileUrl: profileUrl.trim() } : {}),
+			})),
+	});
+	const participantsInvalid = details.error?.issues.some((issue) => issue.path[0] === "participants") ?? false;
+	const canSave = !!at && !!draft.applicationId && details.success && !pending;
+	const showZone = otherZone || draft.timezone !== preferredZone;
+	const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((prev) => ({ ...prev, [key]: value }));
+	const setParticipant = (participantId: string, patch: Partial<Draft["participants"][number]>) =>
+		setDraft((prev) => ({
+			...prev,
+			participants: prev.participants.map((participant) =>
+				participant.id === participantId ? { ...participant, ...patch } : participant,
+			),
+		}));
+
+	const save = async () => {
+		const generation = getAccountGeneration();
+		if (!at || !canSave || !details.success) return;
+		const input = { id: draft.applicationId, at: at.toISOString(), ...details.data };
+		try {
+			if (editing) await update.mutateAsync({ ...input, entryId: editing.id });
+			else await add.mutateAsync(input);
+		} catch {
+			return;
+		}
+		if (generation !== getAccountGeneration()) return;
+		invalidate(draft.applicationId);
+		onOpenChange(false);
+		// The server moves this interview's briefing schedule with it; say where it went.
+		const schedules = editing
+			? await queryClient
+					.fetchQuery({ ...orpc.career.schedules.queryOptions({ input: {} }), staleTime: 0 })
+					.catch(() => [])
+			: [];
+		const schedule = schedules.find(
+			(item) => item.kind === "prepare" && item.interviewId === editing?.id && item.enabled,
+		);
+		if (generation !== getAccountGeneration()) return;
+		const savedApplication = application ?? applications.find((item) => item.id === draft.applicationId);
+		toast.add({
+			type: "success",
+			...(editing && savedApplication
+				? {
+						actionProps: interviewCalendarAction(
+							savedApplication,
+							{ ...editing, ...details.data, at },
+							"PUBLISH",
+							generation,
+						),
+					}
+				: {}),
+			description: schedule ? t`Interview saved · briefing moves to ${when(schedule.nextRunAt)}` : t`Interview saved`,
+		});
+	};
+
+	// Commit after Undo closes so a restored round retains its identity, history and briefing schedules.
+	const deleteInterview = () => {
+		if (!editing) return;
+		const form = activeForm.current;
+		const applicationId = draft.applicationId;
+		const generation = getAccountGeneration();
+		const savedApplication = application ?? applications.find((item) => item.id === applicationId);
+		const drop = <T extends Pick<ApplicationSummary, "id" | "activity">>(item: T) =>
+			item.id === applicationId
+				? { ...item, activity: item.activity.filter((entry) => entry.id !== editing.id) }
+				: item;
+		withQueryUndo({
+			queryClient,
+			queryKey: orpc.applications.getById.queryKey({ input: { id: applicationId } }),
+			description: t`Interview deleted`,
+			errorMessage: t`Couldn't delete the interview. Try again.`,
+			prepare: async () => {
+				// Calendar summaries can have no detail query, or a hydrated row without its read function.
+				await queryClient.fetchQuery({ ...applicationDetailQueryOptions(applicationId), staleTime: 0 });
+				const request = await prepareRpc(client.applications.deleteTimelineEntry, {
+					id: applicationId,
+					entryId: editing.id,
+				});
+				return {
+					cancel: request.cancel,
+					send: () =>
+						request.send().then((saved) => {
+							if (savedApplication) showInterviewCancellation(savedApplication, editing, generation);
+							return saved;
+						}),
+				};
+			},
+			hide: () => {
+				queryClient.setQueryData(applicationsListQueryKey(), (list) => list?.map(drop));
+				queryClient.setQueryData(
+					orpc.applications.getById.queryKey({ input: { id: applicationId } }),
+					(item) => item && drop(item),
+				);
+				if (form && activeForm.current === form) onOpenChange(false);
+			},
+			restore: () => {},
+		});
+	};
+
+	const lengths = LENGTHS.includes(draft.durationMinutes)
+		? LENGTHS
+		: [...LENGTHS, draft.durationMinutes].sort((a, b) => a - b);
+	const pickable = applications.filter((item) => item.status !== "closed");
+
+	const Title = inline ? "h2" : DialogTitle;
+	const Description = inline ? "p" : DialogDescription;
+	const body = (
+		<>
+			<div className={cn("grid gap-0.5 ps-6 pt-5", inline ? "pe-6" : "pe-14")}>
+				<Title id={`${id}-title`} tabIndex={inline ? -1 : undefined} className="t-section-title outline-none">
+					{editing ? <Trans>Edit interview</Trans> : <Trans>Schedule an interview</Trans>}
+				</Title>
+				<Description className="text-[13px] leading-[18px] text-ink-3">
+					{application ? (
+						<>
+							{application.role} · {application.company}
+						</>
+					) : (
+						<Trans>It will show on the application's timeline and on the calendar.</Trans>
+					)}
+				</Description>
+			</div>
+
+			<div className="grid min-h-0 flex-1 content-start gap-4 overflow-y-auto overscroll-contain px-6 py-[18px]">
+				{!application && (
+					<Field label={t`Application`} htmlFor={`${id}-application`}>
+						<Combobox
+							id={`${id}-application`}
+							className="w-full"
+							value={draft.applicationId || null}
+							placeholder={t`Choose an application…`}
+							emptyMessage={t`No active applications.`}
+							options={pickable.map((item) => ({
+								value: item.id,
+								label: `${item.company} — ${item.role}`,
+								keywords: [item.company, item.role],
+							}))}
+							onValueChange={(value) => {
+								set("applicationId", value ?? "");
+								// The likely next type for the job just picked, as the dialog would open with for it.
+								const picked = applications.find((item) => item.id === value);
+								if (picked) set("kind", suggestedKind(picked));
+							}}
+						/>
+					</Field>
+				)}
+
+				<Field label={t`Type`}>
+					<Segments
+						label={t`Type`}
+						value={draft.kind}
+						options={KINDS.map((kind) => ({ value: kind, label: interviewTypeLabel(kind) }))}
+						onChange={(kind) => set("kind", kind)}
+						className="h-auto flex-wrap sm:h-9 sm:flex-nowrap"
+					/>
+				</Field>
+
+				<div className="grid gap-2.5 sm:grid-cols-[minmax(0,1.25fr)_minmax(0,0.8fr)_auto]">
+					<Field label={t`Date`} htmlFor={`${id}-date`}>
+						<DateField
+							id={`${id}-date`}
+							required
+							aria-invalid={!draft.date}
+							value={draft.date}
+							onChange={(event) => set("date", event.target.value)}
+						/>
+					</Field>
+					<Field label={t`Time · ${timeZoneName(draft.timezone)}`} htmlFor={`${id}-time`}>
+						<DateField
+							id={`${id}-time`}
+							type="time"
+							required
+							aria-invalid={!draft.time || (!!draft.date && !at)}
+							aria-describedby={draft.date && draft.time && !at ? `${id}-time-error` : undefined}
+							value={draft.time}
+							onChange={(event) => set("time", event.target.value)}
+						/>
+					</Field>
+					<Field label={t`Length · minutes`}>
+						<Segments
+							label={t`Length in minutes`}
+							value={draft.durationMinutes}
+							options={lengths.map((minutes) => ({ value: minutes, label: String(minutes) }))}
+							onChange={(minutes) => set("durationMinutes", minutes)}
+						/>
+					</Field>
+				</div>
+
+				{draft.date && draft.time && !at && (
+					<p id={`${id}-time-error`} role="alert" className="text-xs text-danger-text">
+						<Trans>This time does not exist in the selected timezone. Choose another time.</Trans>
+					</p>
+				)}
+
+				{showZone ? (
+					<div className="-mt-1 grid gap-1.5">
+						<Field label={t`Interview timezone`} htmlFor={`${id}-timezone`}>
+							<Combobox
+								id={`${id}-timezone`}
+								className="w-full"
+								value={draft.timezone}
+								options={zones.map((zone) => ({ value: zone, label: zone.replaceAll("_", " ") }))}
+								onValueChange={(value) => value && set("timezone", value)}
+							/>
+						</Field>
+						{at && draft.timezone !== preferredZone && (
+							<p className="text-xs text-ink-3">
+								<Trans>
+									{draft.time} in {draft.timezone} is {when(at)} in your timezone ({preferredZone}).
+								</Trans>
+							</p>
+						)}
+					</div>
+				) : (
+					<p className="-mt-2 text-xs text-ink-3">
+						<Trans>Shown in your timezone.</Trans>{" "}
+						<button
+							type="button"
+							className="underline underline-offset-2 transition-colors duration-quick hover:text-ink-2"
+							onClick={() => setOtherZone(true)}
+						>
+							<Trans>Interview is in another timezone</Trans>
+						</button>
+					</p>
+				)}
+
+				<Field label={t`Location`} htmlFor={`${id}-location`}>
+					<Input
+						id={`${id}-location`}
+						value={draft.location}
+						maxLength={500}
+						aria-describedby={`${id}-location-help`}
+						onChange={(event) => set("location", event.target.value)}
+					/>
+					<p id={`${id}-location-help`} className="text-xs/4 text-ink-3">
+						<Trans>A video link, an office address or a phone number.</Trans>
+					</p>
+				</Field>
+
+				<fieldset className="grid gap-2">
+					<legend className="mb-1.5 text-xs font-medium text-ink-2">
+						<Trans>Who you'll meet</Trans>
+					</legend>
+					{draft.participants.map((participant, index) => (
+						<div key={participant.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_28px_28px] gap-2">
+							<Input
+								aria-label={t`Name of person ${i18n.number(index + 1)}`}
+								placeholder={t`Name`}
+								value={participant.name}
+								maxLength={200}
+								onChange={(event) => setParticipant(participant.id, { name: event.target.value })}
+							/>
+							<Input
+								aria-label={t`Role of person ${i18n.number(index + 1)}`}
+								placeholder={t`Role`}
+								value={participant.role}
+								maxLength={200}
+								onChange={(event) => setParticipant(participant.id, { role: event.target.value })}
+							/>
+							<Popover>
+								<PopoverTrigger
+									render={
+										<IconButton
+											icon="link"
+											label={t`Profile link of person ${i18n.number(index + 1)}`}
+											size="icon-sm"
+										/>
+									}
+								/>
+								<PopoverContent className="w-80">
+									<Input
+										type="url"
+										aria-label={t`Profile link of person ${i18n.number(index + 1)}`}
+										placeholder={t`Profile link (optional)`}
+										className="w-full"
+										value={participant.profileUrl}
+										maxLength={2048}
+										onChange={(event) => setParticipant(participant.id, { profileUrl: event.target.value })}
+									/>
+								</PopoverContent>
+							</Popover>
+							<IconButton
+								icon="x"
+								iconSize={18}
+								label={t`Remove person ${i18n.number(index + 1)}`}
+								className="h-9 w-8 text-ink-2"
+								onClick={() =>
+									set(
+										"participants",
+										draft.participants.filter((item) => item.id !== participant.id),
+									)
+								}
+							/>
+						</div>
+					))}
+					{participantsInvalid && (
+						<p role="status" className="text-xs text-danger-text">
+							<Trans>Profile links must be public HTTPS addresses.</Trans>
+						</p>
+					)}
+					<Button
+						size="sm"
+						variant="ghost"
+						className="w-fit text-ink-2"
+						disabled={draft.participants.length >= 20}
+						onClick={() =>
+							set("participants", [...draft.participants, { id: generateId(), name: "", role: "", profileUrl: "" }])
+						}
+					>
+						<Icon name="user-plus" size={18} />
+						<Trans>Add a person</Trans>
+					</Button>
+				</fieldset>
+
+				<Field label={t`What they asked you to prepare`} htmlFor={`${id}-notes`}>
+					<Input
+						id={`${id}-notes`}
+						value={draft.notes}
+						maxLength={5000}
+						onChange={(event) => set("notes", event.target.value)}
+					/>
+				</Field>
+			</div>
+
+			<div className="flex flex-wrap items-center justify-between gap-2 px-6 py-3.5 pb-[max(14px,env(safe-area-inset-bottom))] max-sm:flex-col-reverse max-sm:items-stretch">
+				{editing && (
+					<Button variant="danger-text" disabled={pending} onClick={deleteInterview}>
+						<Trans>Delete interview</Trans>
+					</Button>
+				)}
+				<div className="ms-auto flex max-w-full flex-wrap items-center justify-end gap-2 max-sm:w-full max-sm:flex-col-reverse max-sm:items-stretch">
+					<Button variant="ghost" onClick={() => onOpenChange(false)}>
+						<Trans>Cancel</Trans>
+					</Button>
+					<Button loading={pending} disabled={!canSave} onClick={() => void save()}>
+						<Trans>Save interview</Trans>
+					</Button>
+				</div>
+			</div>
+		</>
+	);
+
+	if (inline)
+		return open ? (
+			<section
+				aria-labelledby={`${id}-title`}
+				className="flex min-h-0 flex-1 flex-col"
+				onKeyDown={(event) => {
+					// Esc goes back to the details, not out of the sheet.
+					if (event.key !== "Escape" || event.defaultPrevented) return;
+					event.stopPropagation();
+					onOpenChange(false);
+				}}
+			>
+				{body}
+			</section>
+		) : null;
+
+	return (
+		<Dialog open={open} onOpenChange={onOpenChange} onOpenChangeComplete={onOpenChangeComplete}>
+			<DialogContent
+				closeLabel={t`Close`}
+				className={cn("flex max-h-[min(820px,calc(100svh-2rem))] flex-col gap-0 overflow-hidden p-0 sm:max-w-[560px]")}
+			>
+				{body}
+			</DialogContent>
+		</Dialog>
+	);
+}
+
+type SegmentsProps<T extends string | number> = {
+	label: string;
+	value: T;
+	options: { value: T; label: string }[];
+	onChange: (value: T) => void;
+	className?: string;
+};
+
+/** A segmented control whose raised thumb slides between choices. */
+function Segments<T extends string | number>({ label, value, options, onChange, className }: SegmentsProps<T>) {
+	const id = useId();
+	return (
+		<SegmentedControl
+			aria-label={label}
+			value={value}
+			onValueChange={(next) => onChange(next as T)}
+			className={cn("flex w-full", className)}
+		>
+			{options.map((option) => (
+				<SegmentedControlItem
+					key={option.value}
+					value={option.value}
+					className="min-h-[30px] min-w-fit px-2 pointer-coarse:min-w-fit data-checked:bg-transparent data-checked:shadow-none"
+				>
+					{option.value === value && (
+						<m.span
+							layoutId={`${id}-thumb`}
+							transition={{ duration: D2, ease: EASE }}
+							className="absolute inset-0 -z-10 rounded-sm bg-raised shadow-e1"
+						/>
+					)}
+					{option.label}
+				</SegmentedControlItem>
+			))}
+		</SegmentedControl>
+	);
+}
+
+type FieldProps = { label: string; htmlFor?: string; children: React.ReactNode };
+
+function Field({ label, htmlFor, children }: FieldProps) {
+	return (
+		<div className="grid content-start gap-1.5">
+			<Label htmlFor={htmlFor} className="text-xs font-medium text-ink-2">
+				{label}
+			</Label>
+			{children}
+		</div>
+	);
+}

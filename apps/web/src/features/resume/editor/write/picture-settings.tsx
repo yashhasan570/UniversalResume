@@ -1,0 +1,875 @@
+import type { Area } from "react-easy-crop";
+import type z from "zod";
+import { i18n } from "@lingui/core";
+import { t } from "@lingui/core/macro";
+import { Trans } from "@lingui/react/macro";
+import { useMutation } from "@tanstack/react-query";
+import { useRef, useState } from "react";
+import Cropper from "react-easy-crop";
+import { pictureSchema } from "@universal-resume/schema/resume/data";
+import { Button } from "@universal-resume/ui/components/button";
+import { ButtonGroup } from "@universal-resume/ui/components/button-group";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@universal-resume/ui/components/dialog";
+import { FormControl, FormItem, FormLabel, FormMessage } from "@universal-resume/ui/components/form";
+import { Icon } from "@universal-resume/ui/components/icon";
+import { IconButton } from "@universal-resume/ui/components/icon-button";
+import { Input } from "@universal-resume/ui/components/input";
+import { InputGroup, InputGroupAddon, InputGroupText } from "@universal-resume/ui/components/input-group";
+import { Popover, PopoverContent, PopoverTrigger } from "@universal-resume/ui/components/popover";
+import { SegmentedControl, SegmentedControlItem } from "@universal-resume/ui/components/segmented-control";
+import { Slider } from "@universal-resume/ui/components/slider";
+import { toast } from "@universal-resume/ui/components/toast";
+import "react-easy-crop/react-easy-crop.css";
+import { ColorPicker } from "@/components/input/color-picker";
+import { NumberInput } from "@/components/input/number-input";
+import { useCurrentBuilderResumeSelector, useResumeStore, useUpdateResumeData } from "@/features/resume/builder/draft";
+import { useClosingValue } from "@/hooks/use-closing-value";
+import { useSyncFormValues } from "@/hooks/use-sync-form-values";
+import { getAccountGeneration } from "@/libs/auth/account-scope";
+import { getReadableErrorMessage } from "@/libs/error-message";
+import { orpc } from "@/libs/orpc/client";
+import { useAppForm } from "@/libs/tanstack-form";
+
+type PicturePreviewControlsProps = {
+	form: PictureSettingsForm;
+	normalizedPictureUrl: string;
+	picture: PictureValues;
+	onAutoSave: () => void;
+	onSelectPicture: () => void;
+};
+
+function PicturePreviewControls({ normalizedPictureUrl, picture, onSelectPicture }: PicturePreviewControlsProps) {
+	return (
+		<div className="flex flex-col gap-3">
+			<button
+				type="button"
+				onClick={onSelectPicture}
+				aria-label={t`Change photo`}
+				className="group/picture relative h-28 w-full cursor-pointer overflow-hidden rounded-md bg-sunken transition-colors hover:bg-sunken/50"
+			>
+				{normalizedPictureUrl && (
+					<img
+						alt=""
+						src={normalizedPictureUrl}
+						style={{ objectFit: picture.fit }}
+						className="relative z-10 size-full rounded-md transition-opacity group-hover/picture:opacity-20"
+					/>
+				)}
+
+				<div className="absolute inset-0 z-0 flex size-full items-center justify-center">
+					<Icon name="upload-simple" size={24} />
+				</div>
+			</button>
+		</div>
+	);
+}
+
+type PictureFieldProps = {
+	form: PictureSettingsForm;
+	onAutoSave: () => void;
+};
+
+function PictureFitField({ form, onAutoSave }: PictureFieldProps) {
+	return (
+		<form.Field name="fit">
+			{(field) => (
+				<div className="space-y-1.5">
+					<div className="text-sm font-medium">
+						<Trans>Fit</Trans>
+					</div>
+					<SegmentedControl
+						aria-label={t`Fit`}
+						value={field.state.value}
+						onValueChange={(fit) => {
+							field.handleChange(fit as "cover" | "contain");
+							onAutoSave();
+						}}
+					>
+						<SegmentedControlItem value="cover">
+							<Trans>Cover</Trans>
+						</SegmentedControlItem>
+						<SegmentedControlItem value="contain">
+							<Trans>Contain</Trans>
+						</SegmentedControlItem>
+					</SegmentedControl>
+				</div>
+			)}
+		</form.Field>
+	);
+}
+
+function PictureGeometryFields({ form, onAutoSave }: PictureFieldProps) {
+	return (
+		<>
+			<form.Field name="size">
+				{(field) => (
+					<FormItem hasError={field.state.meta.isTouched && field.state.meta.errors.length > 0}>
+						<FormLabel>
+							<Trans>Size</Trans>
+						</FormLabel>
+						<InputGroup>
+							<FormControl
+								render={
+									<NumberInput
+										name={field.name}
+										value={field.state.value}
+										min={32}
+										max={512}
+										step={1}
+										onBlur={field.handleBlur}
+										onValueChange={(value) => {
+											field.handleChange(value);
+											onAutoSave();
+										}}
+									/>
+								}
+							/>
+
+							<InputGroupAddon align="inline-end">
+								<InputGroupText>pt</InputGroupText>
+							</InputGroupAddon>
+						</InputGroup>
+						<FormMessage errors={field.state.meta.errors} />
+					</FormItem>
+				)}
+			</form.Field>
+
+			<form.Field name="aspectRatio">
+				{(field) => (
+					<FormItem hasError={field.state.meta.isTouched && field.state.meta.errors.length > 0}>
+						<FormLabel>
+							<Trans>Aspect ratio</Trans>
+						</FormLabel>
+						<div className="flex items-center gap-x-2">
+							<InputGroup>
+								<FormControl
+									render={
+										<NumberInput
+											name={field.name}
+											value={field.state.value}
+											min={0.5}
+											max={2.5}
+											step={0.1}
+											onBlur={field.handleBlur}
+											onValueChange={(value) => {
+												field.handleChange(value);
+												onAutoSave();
+											}}
+										/>
+									}
+								/>
+							</InputGroup>
+
+							<ButtonGroup className="shrink-0">
+								<Button
+									size="icon"
+									variant="secondary"
+									title={t({
+										comment: "Preset button for setting picture aspect ratio to square",
+										message: "Square",
+									})}
+									onClick={() => {
+										field.handleChange(1);
+										onAutoSave();
+									}}
+								>
+									<div className="aspect-square min-h-3 min-w-3 border border-accent" />
+								</Button>
+								<Button
+									size="icon"
+									variant="secondary"
+									title={t({
+										comment: "Preset button for setting picture aspect ratio to landscape orientation",
+										message: "Landscape",
+									})}
+									onClick={() => {
+										field.handleChange(1.5);
+										onAutoSave();
+									}}
+								>
+									<div className="aspect-1.5/1 min-h-3 min-w-3 border border-accent" />
+								</Button>
+								<Button
+									size="icon"
+									variant="secondary"
+									title={t({
+										comment: "Preset button for setting picture aspect ratio to portrait orientation",
+										message: "Portrait",
+									})}
+									onClick={() => {
+										field.handleChange(0.5);
+										onAutoSave();
+									}}
+								>
+									<div className="aspect-1/1.5 min-h-3 min-w-3 border border-accent" />
+								</Button>
+							</ButtonGroup>
+						</div>
+					</FormItem>
+				)}
+			</form.Field>
+
+			<form.Field name="borderRadius">
+				{(field) => (
+					<FormItem hasError={field.state.meta.isTouched && field.state.meta.errors.length > 0}>
+						<FormLabel>
+							<Trans>Border radius</Trans>
+						</FormLabel>
+						<div className="flex items-center gap-x-2">
+							<InputGroup>
+								<FormControl
+									render={
+										<NumberInput
+											name={field.name}
+											value={field.state.value}
+											min={0}
+											max={100}
+											step={1}
+											onBlur={field.handleBlur}
+											onValueChange={(value) => {
+												field.handleChange(value);
+												onAutoSave();
+											}}
+										/>
+									}
+								/>
+								<InputGroupAddon align="inline-end">pt</InputGroupAddon>
+							</InputGroup>
+
+							<ButtonGroup className="shrink-0">
+								<Button
+									size="icon"
+									variant="secondary"
+									title="0pt"
+									onClick={() => {
+										field.handleChange(0);
+										onAutoSave();
+									}}
+								>
+									<div className="size-3 rounded-none border border-accent" />
+								</Button>
+								<Button
+									size="icon"
+									variant="secondary"
+									title="10pt"
+									onClick={() => {
+										field.handleChange(10);
+										onAutoSave();
+									}}
+								>
+									<div className="size-3 rounded-sm border border-accent" />
+								</Button>
+								<Button
+									size="icon"
+									variant="secondary"
+									title="100pt"
+									onClick={() => {
+										field.handleChange(100);
+										onAutoSave();
+									}}
+								>
+									<div className="size-3 rounded-sm border border-accent" />
+								</Button>
+							</ButtonGroup>
+						</div>
+					</FormItem>
+				)}
+			</form.Field>
+		</>
+	);
+}
+
+type PictureValues = z.infer<typeof pictureSchema>;
+
+function normalizePictureUrl(url: string, origin: string): string {
+	if (!url) return url;
+	if (url.startsWith("/uploads/")) return `/api${url}`;
+
+	try {
+		const parsed = new URL(url, origin);
+		if (parsed.origin !== origin) return url;
+		if (!parsed.pathname.startsWith("/uploads/")) return url;
+		return `/api${parsed.pathname}${parsed.search}${parsed.hash}`;
+	} catch {
+		return url;
+	}
+}
+
+async function getCroppedImageBlob(imageSrc: string, pixelCrop: Area, mimeType: string): Promise<Blob> {
+	const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+		const element = new Image();
+		element.addEventListener("load", () => {
+			resolve(element);
+		});
+		element.addEventListener("error", () => {
+			reject(new Error("Failed to load image for cropping"));
+		});
+		element.src = imageSrc;
+	});
+
+	const canvas = document.createElement("canvas");
+	const context = canvas.getContext("2d");
+	if (!context) throw new Error("Canvas 2D context is not available");
+
+	canvas.width = Math.round(pixelCrop.width);
+	canvas.height = Math.round(pixelCrop.height);
+	// Preserve transparency for lossless inputs and compressed formats for photos.
+	const outputType = mimeType === "image/jpeg" || mimeType === "image/webp" ? mimeType : "image/png";
+	const maxUploadBytes = 10 * 1024 * 1024;
+
+	while (true) {
+		context.drawImage(
+			image,
+			pixelCrop.x,
+			pixelCrop.y,
+			pixelCrop.width,
+			pixelCrop.height,
+			0,
+			0,
+			canvas.width,
+			canvas.height,
+		);
+
+		const blob = await new Promise<Blob>((resolve, reject) => {
+			canvas.toBlob(
+				(result) => {
+					if (result) resolve(result);
+					else reject(new Error("Canvas is empty"));
+				},
+				outputType,
+				0.9,
+			);
+		});
+		if (blob.size <= maxUploadBytes) return blob;
+		if (canvas.width <= 1 && canvas.height <= 1) throw new Error("Cropped image exceeds the upload limit");
+
+		// Re-encoding even a JPEG can exceed the API limit. Reduce only oversized crops,
+		// drawing from the original each time to avoid accumulating resampling artifacts.
+		const scale = Math.min(0.9, Math.sqrt(maxUploadBytes / blob.size) * 0.95);
+		canvas.width = Math.max(1, Math.floor(canvas.width * scale));
+		canvas.height = Math.max(1, Math.floor(canvas.height * scale));
+	}
+}
+
+function usePictureSettingsForm(picture: PictureValues, persist: (data: PictureValues) => void) {
+	const form = useAppForm({
+		defaultValues: picture,
+		validators: { onChange: pictureSchema },
+		onSubmit: ({ value }) => {
+			persist(value);
+		},
+	});
+	useSyncFormValues(form, picture);
+
+	return form;
+}
+
+type PictureSettingsForm = ReturnType<typeof usePictureSettingsForm>;
+
+type CropState = {
+	file: File;
+	imageSrc: string;
+};
+
+type PictureCropDialogProps = {
+	cropState: CropState | null;
+	aspect: number;
+	onClose: () => void;
+	onUpload: (file: File) => void;
+};
+
+function PictureCropDialog({ cropState, aspect, onClose, onUpload }: PictureCropDialogProps) {
+	// Closing keeps the picture in the cropper until the dialog has faded out.
+	const [shownCrop, onCropOpenChangeComplete] = useClosingValue(cropState);
+	const [crop, setCrop] = useState({ x: 0, y: 0 });
+	const [zoom, setZoom] = useState(1);
+	const [croppedAreaPixels, setCroppedAreaPixels] = useState<Area | null>(null);
+
+	const onConfirmCrop = async () => {
+		if (!cropState) return;
+
+		let fileToUpload: File = cropState.file;
+		try {
+			if (croppedAreaPixels) {
+				const blob = await getCroppedImageBlob(cropState.imageSrc, croppedAreaPixels, cropState.file.type);
+				fileToUpload = new File([blob], cropState.file.name, { type: blob.type });
+			}
+		} catch {
+			toast.add({ type: "error", description: t`Couldn't crop the photo. Try a different photo.` });
+			return;
+		}
+
+		onUpload(fileToUpload);
+		onClose();
+	};
+
+	return (
+		<Dialog
+			open={cropState !== null}
+			onOpenChange={(open) => {
+				if (!open) onClose();
+			}}
+			onOpenChangeComplete={(open) => {
+				if (!open) {
+					// The object URL is freed only once the cropper has gone; the next picture starts unzoomed.
+					if (shownCrop) URL.revokeObjectURL(shownCrop.imageSrc);
+					setCrop({ x: 0, y: 0 });
+					setZoom(1);
+					setCroppedAreaPixels(null);
+				}
+				onCropOpenChangeComplete(open);
+			}}
+		>
+			<DialogContent closeLabel={t`Close`}>
+				<DialogHeader>
+					<DialogTitle>
+						<Trans>Crop photo</Trans>
+					</DialogTitle>
+					<DialogDescription>
+						<Trans>Drag to reposition and use the slider to zoom before uploading.</Trans>
+					</DialogDescription>
+				</DialogHeader>
+
+				{shownCrop && (
+					<div className="relative h-50 w-full overflow-hidden rounded-md bg-sunken ring-1 ring-line ring-inset">
+						<Cropper
+							image={shownCrop.imageSrc}
+							crop={crop}
+							zoom={zoom}
+							aspect={aspect}
+							onCropChange={setCrop}
+							onZoomChange={setZoom}
+							onCropComplete={(_, areaPixels) => {
+								setCroppedAreaPixels(areaPixels);
+							}}
+						/>
+					</div>
+				)}
+
+				<div className="space-y-2.5">
+					<div className="flex items-center justify-between">
+						<FormLabel className="mb-0">
+							<Trans>Zoom</Trans>
+						</FormLabel>
+						<span className="text-xs text-ink-3 tabular-nums">
+							{i18n.number(zoom, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}×
+						</span>
+					</div>
+					<div className="flex items-center gap-x-3">
+						<Icon name="magnifying-glass-minus" size={16} className="shrink-0 text-ink-3" />
+						<Slider
+							min={1}
+							max={3}
+							step={0.01}
+							value={[zoom]}
+							aria-label={t`Zoom`}
+							className="flex-1"
+							onValueChange={(value) => {
+								setZoom(Array.isArray(value) ? value[0] : value);
+							}}
+						/>
+						<Icon name="magnifying-glass-plus" size={16} className="shrink-0 text-ink-3" />
+					</div>
+				</div>
+
+				{shownCrop && shownCrop.file.size > 10 * 1024 * 1024 && (
+					<p role="status" className="flex items-start gap-1.5 text-sm text-danger-text">
+						<Icon name="warning-circle" size={18} className="mt-px shrink-0" />
+						{t`This photo is larger than 10 MB. Use Crop and upload to shrink it.`}
+					</p>
+				)}
+				<DialogFooter className="flex-row flex-wrap justify-between">
+					<Button variant="ghost" onClick={onClose}>
+						<Trans>Cancel</Trans>
+					</Button>
+					<div className="flex flex-wrap gap-2">
+						<Button
+							variant="ghost"
+							disabled={!cropState || cropState.file.size > 10 * 1024 * 1024}
+							onClick={() => {
+								if (!cropState) return;
+								onUpload(cropState.file);
+								onClose();
+							}}
+						>
+							<Trans>Skip and upload</Trans>
+						</Button>
+						<Button
+							variant="secondary"
+							disabled={!croppedAreaPixels}
+							onClick={() => {
+								void onConfirmCrop();
+							}}
+						>
+							<Trans>Crop and upload</Trans>
+						</Button>
+					</div>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
+}
+
+type ColorWidthFieldsProps = PictureFieldProps & {
+	colorName: "borderColor" | "shadowColor";
+	widthName: "borderWidth" | "shadowWidth";
+	colorLabel: string;
+	widthLabel: string;
+	step: number;
+};
+
+function ColorWidthFields(props: ColorWidthFieldsProps) {
+	const { form, onAutoSave, colorName, widthName, colorLabel, widthLabel, step } = props;
+
+	return (
+		<div className="flex items-end gap-x-3">
+			<form.Field name={colorName}>
+				{(field) => (
+					<FormItem
+						className="mb-1.5 shrink-0"
+						hasError={field.state.meta.isTouched && field.state.meta.errors.length > 0}
+					>
+						<FormLabel className="sr-only">{colorLabel}</FormLabel>
+						<FormControl
+							render={
+								<ColorPicker
+									defaultValue={field.state.value}
+									onChange={(color) => {
+										field.handleChange(color);
+										onAutoSave();
+									}}
+								/>
+							}
+						/>
+					</FormItem>
+				)}
+			</form.Field>
+
+			<form.Field name={widthName}>
+				{(field) => (
+					<FormItem className="flex-1" hasError={field.state.meta.isTouched && field.state.meta.errors.length > 0}>
+						<FormLabel>{widthLabel}</FormLabel>
+						<InputGroup>
+							<FormControl
+								render={
+									<NumberInput
+										name={field.name}
+										value={field.state.value}
+										min={0}
+										step={step}
+										onBlur={field.handleBlur}
+										onValueChange={(value) => {
+											field.handleChange(value);
+											onAutoSave();
+										}}
+									/>
+								}
+							/>
+							<InputGroupAddon align="inline-end">
+								<InputGroupText>pt</InputGroupText>
+							</InputGroupAddon>
+						</InputGroup>
+					</FormItem>
+				)}
+			</form.Field>
+		</div>
+	);
+}
+
+/** Every photo option: upload with crop, address, show or hide, delete, fit, size, shape, border and shadow. */
+type PictureSettingsProps = { locked: boolean };
+
+export function PictureSettings({ locked }: PictureSettingsProps) {
+	const fileInputRef = useRef<HTMLInputElement>(null);
+	const appOrigin = window.location.origin;
+
+	const [cropState, setCropState] = useState<CropState | null>(null);
+
+	const resumeId = useCurrentBuilderResumeSelector((resume) => resume.id);
+	const picture = useCurrentBuilderResumeSelector((resume) => resume.data.picture);
+	const normalizedPictureUrl = normalizePictureUrl(picture.url, appOrigin);
+	const generation = getAccountGeneration();
+	const current = () => {
+		const resume = useResumeStore.getState().resume;
+		return generation === getAccountGeneration() && resume?.id === resumeId && !resume.isLocked;
+	};
+	const updateResumeData = useUpdateResumeData();
+
+	const { mutate: uploadFile } = useMutation(orpc.storage.uploadFile.mutationOptions({ meta: { noInvalidate: true } }));
+
+	const persist = (data: PictureValues) => {
+		updateResumeData((draft) => {
+			draft.picture = data;
+		});
+	};
+
+	const form = usePictureSettingsForm(picture, persist);
+
+	const handleAutoSave = () => {
+		persist(form.state.values);
+	};
+
+	const onSelectPicture = () => {
+		if (!fileInputRef.current) return;
+		fileInputRef.current?.click();
+	};
+
+	const onDeletePicture = () => {
+		const current = useResumeStore.getState().resume;
+		if (current?.id !== resumeId || current.isLocked || !current.data.picture.url) return;
+		const removedUrl = current.data.picture.url;
+		// Copies and History share the upload; remove only this resume's reference.
+		form.reset({ ...current.data.picture, url: "" });
+		updateResumeData(
+			(draft) => {
+				draft.picture.url = "";
+			},
+			{ newStep: true },
+		);
+		const toastId = toast.add({
+			description: t`Photo removed`,
+			actionProps: {
+				children: t`Undo`,
+				onClick: () => {
+					toast.close(toastId);
+					const state = useResumeStore.getState();
+					const resume = state.resume;
+					if (resume?.id !== resumeId || resume.isLocked || resume.data.picture.url !== "") return;
+					state.updateResumeData(
+						(draft) => {
+							draft.picture.url = removedUrl;
+						},
+						{ newStep: true },
+					);
+				},
+			},
+		});
+	};
+
+	const uploadPictureFile = (file: File) => {
+		if (!current()) return;
+		if (file.size > 10 * 1024 * 1024) {
+			toast.add({ type: "error", description: t`This photo is larger than 10 MB. Use Crop and upload to shrink it.` });
+			return;
+		}
+		const originalUrl = useResumeStore.getState().resume?.data.picture.url;
+		const toastId = toast.add({ type: "loading", description: t`Uploading photo…` });
+
+		uploadFile(file, {
+			onSuccess: ({ url }) => {
+				toast.close(toastId);
+				if (!current() || useResumeStore.getState().resume?.data.picture.url !== originalUrl) return;
+				form.setFieldValue("url", url);
+				toast.add({ description: t`Photo added` });
+				updateResumeData(
+					(draft) => {
+						draft.picture.url = url;
+					},
+					{ newStep: true },
+				);
+			},
+			onError: (error) => {
+				if (!current()) return toast.close(toastId);
+				toast.add({
+					type: "error",
+					description: getReadableErrorMessage(
+						error,
+						t`Couldn't upload the photo. Choose a readable PNG, JPEG, WebP or GIF photo up to 10 MB, then try again.`,
+					),
+					id: toastId,
+				});
+			},
+			onSettled: () => {
+				if (fileInputRef.current) fileInputRef.current.value = "";
+			},
+		});
+	};
+
+	const onUploadPicture = async (e: React.ChangeEvent<HTMLInputElement>) => {
+		const file = e.target.files?.[0];
+		e.target.value = "";
+		if (!file || !current()) return;
+		const imageSrc = URL.createObjectURL(file);
+		const image = new Image();
+		image.src = imageSrc;
+		try {
+			await image.decode();
+			if (!current()) {
+				URL.revokeObjectURL(imageSrc);
+				return;
+			}
+		} catch {
+			URL.revokeObjectURL(imageSrc);
+			e.target.value = "";
+			if (!current()) return;
+			toast.add({
+				type: "error",
+				description: t`This file isn't a readable image. Choose a PNG, JPEG, WebP or GIF photo.`,
+			});
+			return;
+		}
+		if (form.state.values.fit === "contain" && file.size <= 10 * 1024 * 1024) {
+			URL.revokeObjectURL(imageSrc);
+			uploadPictureFile(file);
+			return;
+		}
+
+		// Open the interactive crop step instead of uploading immediately.
+		setCropState({ file, imageSrc });
+	};
+
+	const closeCropDialog = () => {
+		setCropState(null);
+		if (fileInputRef.current) fileInputRef.current.value = "";
+	};
+
+	return (
+		<div id="sidebar-picture" className="col-span-full flex items-center gap-3">
+			<input
+				ref={fileInputRef}
+				type="file"
+				accept="image/*"
+				aria-label={t`Upload photo`}
+				className="hidden"
+				onChange={onUploadPicture}
+			/>
+			{picture.url ? (
+				<img src={normalizedPictureUrl} alt="" className="size-10 shrink-0 rounded-md object-cover" />
+			) : (
+				<span className="grid size-10 shrink-0 place-items-center rounded-md bg-sunken text-ink-3">
+					<Icon name="camera-plus" />
+				</span>
+			)}
+			<p className="min-w-0 flex-1 text-xs leading-4 text-ink-2">
+				{!picture.url ? (
+					<Trans>No photo. Most ATS ignore photos; some regions expect one.</Trans>
+				) : picture.hidden ? (
+					<Trans>Photo hidden from the page.</Trans>
+				) : (
+					<Trans>Photo on the page.</Trans>
+				)}
+			</p>
+			<PictureCropDialog
+				cropState={cropState}
+				aspect={Number(form.state.values.aspectRatio) || 1}
+				onClose={closeCropDialog}
+				onUpload={uploadPictureFile}
+			/>
+
+			{!picture.url && (
+				<Button variant="secondary" size="sm" disabled={locked} onClick={onSelectPicture}>
+					<Trans>Add photo</Trans>
+				</Button>
+			)}
+			<Popover>
+				<PopoverTrigger
+					render={
+						<Button
+							variant={picture.url ? "secondary" : "ghost"}
+							size={picture.url ? "sm" : "icon-sm"}
+							aria-label={picture.url ? undefined : t`Photo settings`}
+							disabled={locked}
+						>
+							{picture.url ? <Trans>Edit</Trans> : <Icon name="dots-three" />}
+						</Button>
+					}
+				/>
+				<PopoverContent align="end" className="max-h-[70svh] w-[360px] overflow-y-auto p-4">
+					<form
+						className="space-y-4"
+						onSubmit={(event) => {
+							event.preventDefault();
+							event.stopPropagation();
+							void form.handleSubmit();
+						}}
+					>
+						<PicturePreviewControls
+							form={form}
+							normalizedPictureUrl={normalizedPictureUrl}
+							picture={picture}
+							onAutoSave={handleAutoSave}
+							onSelectPicture={onSelectPicture}
+						/>
+
+						{picture.url && (
+							<>
+								<div className="grid grid-cols-2 gap-3">
+									<PictureFitField form={form} onAutoSave={handleAutoSave} />
+									<PictureGeometryFields form={form} onAutoSave={handleAutoSave} />
+
+									<ColorWidthFields
+										form={form}
+										colorName="borderColor"
+										widthName="borderWidth"
+										colorLabel={t`Border color`}
+										widthLabel={t`Border width`}
+										step={1}
+										onAutoSave={handleAutoSave}
+									/>
+									<ColorWidthFields
+										form={form}
+										colorName="shadowColor"
+										widthName="shadowWidth"
+										colorLabel={t`Shadow color`}
+										widthLabel={t`Shadow width`}
+										step={0.5}
+										onAutoSave={handleAutoSave}
+									/>
+								</div>
+							</>
+						)}
+						<form.Field name="url">
+							{(field) => (
+								<FormItem
+									className="flex-1"
+									hasError={field.state.meta.isTouched && field.state.meta.errors.length > 0}
+								>
+									<FormLabel>
+										<Trans>Or use an image address</Trans>
+									</FormLabel>
+									<div className="flex items-center gap-x-2">
+										<FormControl
+											render={
+												<Input
+													name={field.name}
+													value={field.state.value}
+													onBlur={field.handleBlur}
+													onChange={(event) => {
+														field.handleChange(event.target.value);
+														handleAutoSave();
+													}}
+												/>
+											}
+										/>
+									</div>
+								</FormItem>
+							)}
+						</form.Field>
+					</form>
+				</PopoverContent>
+			</Popover>
+			{picture.url && (
+				<>
+					<IconButton
+						icon={picture.hidden ? "eye-slash" : "eye"}
+						label={picture.hidden ? t`Show photo` : t`Hide photo`}
+						size="icon-sm"
+						disabled={locked}
+						onClick={() => {
+							form.setFieldValue("hidden", !picture.hidden);
+							handleAutoSave();
+						}}
+					/>
+					<IconButton icon="trash" label={t`Remove photo`} size="icon-sm" disabled={locked} onClick={onDeletePicture} />
+				</>
+			)}
+		</div>
+	);
+}

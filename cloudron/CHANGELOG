@@ -1,0 +1,57 @@
+[6.1.1]
+* Refresh the job search workspace and resume builder with the Calm interface and phone layouts.
+* Add custom CSS for public resume pages, separate from PDF styling.
+* Preserve guest application workspaces, saved preparation and practice transcripts when linking accounts.
+* Fix localized date editing, Georgian PDF text, uploaded pictures and Word export headers.
+* Recheck practice stories after their supporting facts change.
+* Add optional font mirroring and assistant timeout settings; allow keyless OpenAI-compatible providers.
+* Apply a startup index migration. Application Trash expires after 30 days; existing items are kept until at least December 31, 2026 UTC.
+
+[6.1.0]
+* Apply with a private profile, reviewed answers and application packets; fill supported employer forms from the desktop browser helper.
+* Save job postings from the browser helper or the mobile share sheet.
+* Add feedback links for coaches and reviewers, resume language copies, keyboard shortcuts and application Trash.
+* Add optional fast and capable AI models per connection and a weekly AI usage report.
+* Improve PDF and Word imports, Indic, Ethiopic and Khmer PDF fonts, and right-to-left public pages.
+* Include uploaded files and version history in account backups.
+* Default new API keys to read-only.
+* Apply 23 additive startup migrations. Back up the database before upgrading. No new environment variables.
+* Complete web and mobile translations.
+
+[6.0.8]
+* Add entry header layouts, row order and accent controls across resume templates.
+* Add custom application stages with names, colors, ordering and preserved application history.
+* Add shareable resume pages and custom-domain controls, including available .cv suggestions.
+* Speed up application lists and public pages; fix alias loading, share links and sign-in layouts.
+* Harden sign-in, assistant approvals, document access, imports and exports.
+* Require STARTTLS or direct TLS for SMTP. Reconfigure plaintext-only mail servers before upgrading.
+* Apply startup migrations for resume sharing, application stages and username reservations. Back up the database before upgrading.
+* Complete web and mobile translations.
+
+[6.0.6]
+* Refresh the visual design with the original colors, new typefaces and clearer interface copy.
+* Speed up browsing with cached thumbnails and on-demand PDF viewer loading.
+* Link the iOS and Android apps from the homepage.
+* Prevent edits to resumes in Trash.
+* Clean up read notifications older than 90 days. No migrations or configuration changes.
+* Complete web and mobile translations.
+
+[6.0.5]
+* Preserve guest photos and attachments when signing up or linking an account.
+* Add search-country preferences and optional direct SearXNG search.
+* Repair renamed public resume links, PDF text imports and page backgrounds.
+* Improve mobile navigation, sign-in, refresh feedback and PDF zoom controls.
+* Harden authentication, document access, imports and outbound requests.
+* Apply startup migrations for username reservations, Trash cleanup indexes and deleted conversation messages. Back up the database before upgrading; Trash items older than 30 days are now deleted.
+* Reject example secrets in production and require AUTH_SECRET to contain at least 32 characters. Keep valid existing secrets unchanged.
+* Complete web and mobile translations.
+
+[6.0.4]
+* Add the Persian resume template and improve CJK previews on slow connections.
+* Complete web and mobile translations across all supported translation locales.
+* Protect share passwords on locked resumes and allow slower storage health checks.
+* Add native-client sign-in and content-reporting support.
+* Support Computer Modern font mirrors for server-side PDF rendering.
+
+[6.0.3]
+* Initial release

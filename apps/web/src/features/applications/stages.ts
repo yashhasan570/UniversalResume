@@ -1,0 +1,39 @@
+import type { ApplicationClosedReason, ApplicationStatus } from "@universal-resume/schema/applications/data";
+import { t } from "@lingui/core/macro";
+import { STAGES } from "@universal-resume/schema/applications/data";
+
+/** The standard stages an application moves through; closed ends it from any of them. Lanes map onto these. */
+export const PIPELINE: readonly ApplicationStatus[] = ["saved", "applied", "screening", "interview", "offer"];
+
+export const CLOSED_REASONS: readonly ApplicationClosedReason[] = [
+	"accepted",
+	"not-selected",
+	"withdrew",
+	"accepted-other",
+	"no-response",
+];
+
+export const getStageLabel = (status: ApplicationStatus) =>
+	({
+		saved: t`Saved`,
+		applied: t`Applied`,
+		screening: t({
+			comment: "Application stage: the first recruiter screen after applying. Not the resume builder's Check mode.",
+			message: "Screening",
+		}),
+		interview: t`Interview`,
+		offer: t`Offer`,
+		closed: t`Closed`,
+	})[status];
+
+export const getStageColor = (status: ApplicationStatus) =>
+	STAGES.find((stage) => stage.value === status)?.color ?? "var(--ink-3)";
+
+export const getClosedReasonLabel = (reason: ApplicationClosedReason) =>
+	({
+		accepted: t`Accepted offer`,
+		"not-selected": t`Not selected`,
+		withdrew: t`I withdrew`,
+		"accepted-other": t`Accepted another offer`,
+		"no-response": t`No response`,
+	})[reason];

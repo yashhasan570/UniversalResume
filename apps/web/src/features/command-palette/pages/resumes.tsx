@@ -1,0 +1,500 @@
+import type { RouterOutput } from "@/libs/orpc/client";
+import { t } from "@lingui/core/macro";
+import { Trans } from "@lingui/react/macro";
+import { useQuery } from "@tanstack/react-query";
+import { useNavigate, useRouteContext } from "@tanstack/react-router";
+import { CommandLoading, useCommandState } from "cmdk";
+import { useEffect, useState } from "react";
+import { useDebounceValue } from "usehooks-ts";
+import { CommandGroup, CommandItem } from "@universal-resume/ui/components/command";
+import { Icon } from "@universal-resume/ui/components/icon";
+import { useCommandPaletteStore } from "../store";
+import { BaseCommandGroup, RowNote } from "./base";
+import { CreateItems } from "./navigation";
+import { useDialogStore } from "@/dialogs/store";
+import { applicationsListQueryOptions } from "@/features/applications/queries";
+import { orpc } from "@/libs/orpc/client";
+
+type Application = RouterOutput["applications"]["listSummary"][number];
+type Thread = RouterOutput["agent"]["threads"]["list"][number];
+type Document = RouterOutput["documents"]["list"][number];
+type SearchPage = "resumes" | "applications" | "threads";
+type SearchPageProps = { page: SearchPage };
+
+const isSearchPage = (page: string | undefined): page is SearchPage =>
+	page === "resumes" || page === "applications" || page === "threads";
+
+const matchesSearch = (search: string, values: Array<string | null | undefined>) => {
+	const query = search.trim().toLowerCase();
+	return !query || values.some((value) => value?.toLowerCase().includes(query));
+};
+
+/** Results per kind while typing on the first page; Show all opens the kind's own page. */
+const PREVIEW = 3;
+/** Letters continue into the existing paginated Documents library. */
+const LETTER_PREVIEW = 8;
+/** Rows in the first screen's Recent group. */
+const RECENT = 2;
+
+const applicationValues = (application: Application) => [
+	application.company,
+	application.role,
+	application.location,
+	...application.tags,
+	...application.contacts.map((contact) => contact.name),
+];
+
+/**
+ * The server searches names, tags and linked applications (never public addresses), and returns only a bounded page:
+ * a library of thousands of documents isn't loaded to find a few.
+ */
+function useDocumentSearch(search: string, type: "resume" | "letter", limit: number, enabled = true, offset = 0) {
+	const [q] = useDebounceValue(search.trim().slice(0, 500), 200);
+	const tooLong = search.trim().length > 500;
+	const query = useQuery({
+		...orpc.documents.list.queryOptions({
+			input: { type, q, limit, offset, sort: "edited", tags: [], trashed: false },
+		}),
+		// Typed text waits for its own search; it never fetches the unfiltered list first.
+		enabled: enabled && !tooLong && (q !== "" || search.trim() === ""),
+		placeholderData: (previous) => previous,
+	});
+	// Rows for an older query stay hidden: cmdk would still match them on their tags or company.
+	const current = !tooLong && q === search.trim() && !query.isPlaceholderData;
+	return {
+		documents: current ? (query.data ?? []) : [],
+		loading: !tooLong && (!current || query.isLoading),
+		error: current && query.isError,
+		refetch: query.refetch,
+	};
+}
+
+const documentKeywords = (document: Document) => [
+	document.name,
+	...document.tags,
+	document.application?.company ?? "",
+	document.application?.role ?? "",
+];
+
+export function ResumesCommandGroup() {
+	const { session } = useRouteContext({ strict: false });
+	const peekPage = useCommandPaletteStore((state) => state.peekPage);
+
+	const commandPage = peekPage();
+	const searchPage = isSearchPage(commandPage) ? commandPage : undefined;
+
+	if (!session) return null;
+
+	return (
+		<>
+			{commandPage === undefined ? <RootMatches /> : null}
+			{searchPage === "resumes" ? <ResumesPage page={searchPage} /> : null}
+			{searchPage === "applications" ? <ApplicationsPage page={searchPage} /> : null}
+			{searchPage === "threads" ? <ThreadsPage page={searchPage} /> : null}
+		</>
+	);
+}
+
+/** Typing on the first page finds resumes, letters, applications and conversations by name before any command. */
+function RootMatches() {
+	const navigate = useNavigate();
+	const reset = useCommandPaletteStore((state) => state.reset);
+	const pushPage = useCommandPaletteStore((state) => state.pushPage);
+	const search = useCommandPaletteStore((state) => state.search);
+	const typing = search.trim().length > 0;
+	const resumes = useDocumentSearch(search, "resume", PREVIEW + 1, typing);
+	const letters = useDocumentSearch(search, "letter", LETTER_PREVIEW + 1, typing);
+	const { data: applications } = useQuery({ ...applicationsListQueryOptions(), enabled: typing });
+	const { data: threads } = useQuery({ ...orpc.agent.threads.list.queryOptions(), enabled: typing });
+	const setSelected = useCommandPaletteStore((state) => state.setSelected);
+	const selectionMoved = useCommandPaletteStore((state) => state.selectionMoved);
+	const matchingApplications = (applications ?? []).filter((application) =>
+		matchesSearch(search, applicationValues(application)),
+	);
+	const matchingThreads = (threads ?? [])
+		.filter((thread) => thread.scope === "document")
+		.filter((thread) => matchesSearch(search, [thread.title, thread.resumeName, thread.coverLetterName]));
+	// Matches load after the typing settles, when cmdk has already highlighted a command; the top match takes over so
+	// Enter opens it.
+	const topMatch = typing
+		? resumes.documents[0]
+			? `resume.${resumes.documents[0].id}`
+			: letters.documents[0]
+				? `letter.${letters.documents[0].id}`
+				: matchingApplications[0]
+					? `application.${matchingApplications[0].id}`
+					: matchingThreads[0]
+						? `thread.${matchingThreads[0].id}`
+						: undefined
+		: undefined;
+	useEffect(() => {
+		if (topMatch && !selectionMoved) setSelected(topMatch);
+	}, [topMatch, setSelected, selectionMoved, search]);
+	// Nothing matched once every search has answered: no document, application, conversation or command.
+	const matches = useCommandState((state) => state.filtered.count);
+	const settled = !resumes.loading && !letters.loading && applications !== undefined && threads !== undefined;
+	const nothing = typing && settled && matches === 0;
+	if (!typing) return null;
+
+	const openDocument = async (document: Document) => {
+		if (document.type === "resume") await navigate({ to: "/builder/$resumeId", params: { resumeId: document.id } });
+		else await navigate({ to: "/builder/letter/$coverLetterId", params: { coverLetterId: document.id } });
+		reset();
+	};
+	const openApplication = async (application: Application) => {
+		await navigate({ to: "/dashboard/applications", search: { applicationId: application.id } });
+		reset();
+	};
+	// Show all stays visible whatever was typed: it is how the rest of the matches are reached.
+	const more = (page: SearchPage, label: string) => (
+		<CommandItem
+			forceMount
+			value={`more.${page}`}
+			onSelect={() => {
+				pushPage(page);
+				useCommandPaletteStore.getState().setSearch(search);
+			}}
+			className="text-ink-2"
+		>
+			<Icon name="arrow-right" className="rtl:-scale-x-100" />
+			{label}
+		</CommandItem>
+	);
+
+	return (
+		<>
+			{(resumes.documents.length > 0 || letters.documents.length > 0 || letters.error) && (
+				<CommandGroup forceMount={letters.error} heading={<Trans>Documents</Trans>}>
+					{resumes.documents.slice(0, PREVIEW).map((document) => (
+						<CommandItem
+							key={document.id}
+							value={`resume.${document.id}`}
+							keywords={documentKeywords(document)}
+							onSelect={() => void openDocument(document)}
+						>
+							<Icon name="file-text" />
+							<span className="min-w-0 truncate">{document.name}</span>
+							<RowNote>
+								<Trans>Resume</Trans>
+							</RowNote>
+						</CommandItem>
+					))}
+					{resumes.documents.length > PREVIEW && more("resumes", t`Show all resumes`)}
+					{letters.error && (
+						<CommandItem
+							forceMount
+							value="retry.letters"
+							onSelect={() => {
+								void letters.refetch();
+							}}
+						>
+							<Icon name="arrow-clockwise" />
+							<Trans>Couldn't load letters. Try again.</Trans>
+						</CommandItem>
+					)}
+					{letters.documents.slice(0, LETTER_PREVIEW).map((document) => (
+						<CommandItem
+							key={document.id}
+							value={`letter.${document.id}`}
+							keywords={documentKeywords(document)}
+							onSelect={() => void openDocument(document)}
+						>
+							<Icon name="envelope-simple" />
+							<span className="min-w-0 truncate">{document.name}</span>
+							<RowNote>
+								<Trans>Cover letter</Trans>
+							</RowNote>
+						</CommandItem>
+					))}
+					{letters.documents.length > LETTER_PREVIEW && (
+						<CommandItem
+							forceMount
+							value="more.letters"
+							onSelect={async () => {
+								await navigate({
+									to: "/dashboard/documents",
+									search: { type: "letter", q: search.trim().slice(0, 500) },
+								});
+								reset();
+							}}
+							className="text-ink-2"
+						>
+							<Icon name="arrow-right" className="rtl:-scale-x-100" />
+							<Trans>Show all letters</Trans>
+						</CommandItem>
+					)}
+				</CommandGroup>
+			)}
+			{matchingApplications.length > 0 && (
+				<CommandGroup heading={<Trans>Applications</Trans>}>
+					{matchingApplications.slice(0, PREVIEW).map((application) => (
+						<CommandItem
+							key={application.id}
+							value={`application.${application.id}`}
+							keywords={applicationValues(application).filter((value): value is string => !!value)}
+							onSelect={() => void openApplication(application)}
+						>
+							<Icon name="briefcase" />
+							<span className="min-w-0 truncate">
+								{application.company} · {application.role}
+							</span>
+							<RowNote>
+								<Trans>Application</Trans>
+							</RowNote>
+						</CommandItem>
+					))}
+					{matchingApplications.length > PREVIEW && more("applications", t`Show all applications`)}
+				</CommandGroup>
+			)}
+			{matchingThreads.length > 0 && (
+				<CommandGroup heading={<Trans>Assistant conversations</Trans>}>
+					{matchingThreads.slice(0, PREVIEW).map((thread) => (
+						<ThreadItem key={thread.id} thread={thread} onOpen={reset} />
+					))}
+					{matchingThreads.length > PREVIEW && more("threads", t`Show all conversations`)}
+				</CommandGroup>
+			)}
+			{nothing && (
+				<>
+					<p role="status" className="px-3 pt-6 pb-4 text-center text-sm text-ink-3">
+						<Trans>Nothing found for “{search.trim()}”</Trans>
+					</p>
+					<CommandGroup forceMount heading={<Trans>Create</Trans>}>
+						<CreateItems forceMount />
+					</CommandGroup>
+				</>
+			)}
+		</>
+	);
+}
+
+/** The first screen's Recent group: the documents and applications touched last, newest first. */
+export function RecentItems() {
+	const navigate = useNavigate();
+	const reset = useCommandPaletteStore((state) => state.reset);
+	const { data: documents } = useQuery(
+		orpc.documents.list.queryOptions({
+			input: { type: "all", q: "", limit: RECENT, offset: 0, sort: "edited", tags: [], trashed: false },
+		}),
+	);
+	const { data: applications } = useQuery(applicationsListQueryOptions());
+	const recent = [
+		...(documents ?? []).map((document) => ({ at: document.editedAt, document, application: undefined })),
+		...(applications ?? []).map((application) => ({ at: application.updatedAt, document: undefined, application })),
+	]
+		.sort((a, b) => b.at.getTime() - a.at.getTime())
+		.slice(0, RECENT);
+
+	return recent.map(({ document, application }) =>
+		document ? (
+			<CommandItem
+				key={document.id}
+				value={`recent.${document.type}.${document.id}`}
+				keywords={documentKeywords(document)}
+				onSelect={async () => {
+					if (document.type === "resume")
+						await navigate({ to: "/builder/$resumeId", params: { resumeId: document.id } });
+					else await navigate({ to: "/builder/letter/$coverLetterId", params: { coverLetterId: document.id } });
+					reset();
+				}}
+			>
+				<Icon name={document.type === "resume" ? "file-text" : "envelope-simple"} />
+				<span className="min-w-0 truncate">{document.name}</span>
+				<RowNote>{document.type === "resume" ? <Trans>Resume</Trans> : <Trans>Cover letter</Trans>}</RowNote>
+			</CommandItem>
+		) : (
+			<CommandItem
+				key={application.id}
+				value={`recent.application.${application.id}`}
+				keywords={[application.company, application.role]}
+				onSelect={async () => {
+					await navigate({ to: "/dashboard/applications", search: { applicationId: application.id } });
+					reset();
+				}}
+			>
+				<Icon name="briefcase" />
+				<span className="min-w-0 truncate">
+					{application.company} · {application.role}
+				</span>
+				<RowNote>
+					<Trans>Application</Trans>
+				</RowNote>
+			</CommandItem>
+		),
+	);
+}
+
+function ResumesPage({ page }: SearchPageProps) {
+	const navigate = useNavigate();
+	const { openDialog } = useDialogStore();
+	const reset = useCommandPaletteStore((state) => state.reset);
+	const search = useCommandPaletteStore((state) => state.search);
+	const [paging, setPaging] = useState({ search, offset: 0 });
+	if (paging.search !== search) setPaging({ search, offset: 0 });
+	const offset = paging.search === search ? paging.offset : 0;
+	const query = useDocumentSearch(search, "resume", 100, true, offset);
+	const { documents: resumes, loading: isLoading } = query;
+
+	const onCreate = () => {
+		reset();
+		openDialog("document.new", undefined);
+	};
+
+	const onNavigate = async (path: string) => {
+		await navigate({ to: path });
+		reset();
+	};
+
+	return (
+		<BaseCommandGroup page={page} heading={<Trans>Resumes</Trans>}>
+			<CommandItem value="resumes.create" onSelect={onCreate}>
+				<Icon name="plus" />
+				<Trans>Create a new resume</Trans>
+			</CommandItem>
+
+			{isLoading ? (
+				<CommandLoading>
+					<Trans>Loading resumes…</Trans>
+				</CommandLoading>
+			) : (
+				resumes.map((resume) => (
+					<CommandItem
+						key={resume.id}
+						value={`resume.${resume.id}`}
+						keywords={documentKeywords(resume)}
+						onSelect={() => onNavigate(`/builder/${resume.id}`)}
+					>
+						<Icon name="file-text" />
+						<span className="min-w-0 truncate">{resume.name}</span>
+					</CommandItem>
+				))
+			)}
+			{offset > 0 && (
+				<CommandItem
+					forceMount
+					value="resumes.previous"
+					disabled={query.loading}
+					onSelect={() => setPaging({ search, offset: Math.max(0, offset - 100) })}
+				>
+					<Icon name="arrow-left" />
+					<Trans>Previous</Trans>
+				</CommandItem>
+			)}
+			{query.documents.length === 100 && (
+				<CommandItem
+					forceMount
+					value="resumes.next"
+					disabled={query.loading}
+					onSelect={() => setPaging({ search, offset: offset + 100 })}
+				>
+					<Icon name="arrow-right" />
+					<Trans>Next</Trans>
+				</CommandItem>
+			)}
+		</BaseCommandGroup>
+	);
+}
+
+function ApplicationsPage({ page }: SearchPageProps) {
+	const navigate = useNavigate();
+	const reset = useCommandPaletteStore((state) => state.reset);
+	const search = useCommandPaletteStore((state) => state.search);
+	const { data: applications, isLoading } = useQuery(applicationsListQueryOptions());
+	const filteredApplications = (applications ?? []).filter((application) =>
+		matchesSearch(search, applicationValues(application)),
+	);
+
+	const onCreateApplication = async () => {
+		await navigate({ to: "/dashboard/applications", search: { create: true } });
+		reset();
+	};
+
+	const onOpenApplication = async (application: Application) => {
+		await navigate({
+			to: "/dashboard/applications",
+			search: { applicationId: application.id },
+		});
+		reset();
+	};
+
+	return (
+		<BaseCommandGroup page={page} heading={<Trans>Applications</Trans>}>
+			<CommandItem value="applications.create" onSelect={onCreateApplication}>
+				<Icon name="plus" />
+				<Trans>Save job</Trans>
+			</CommandItem>
+
+			{isLoading ? (
+				<CommandLoading>
+					<Trans>Loading applications…</Trans>
+				</CommandLoading>
+			) : (
+				filteredApplications.map((application) => (
+					<CommandItem
+						key={application.id}
+						value={`application.${application.id}`}
+						keywords={applicationValues(application).filter((value): value is string => !!value)}
+						onSelect={() => onOpenApplication(application)}
+					>
+						<Icon name="briefcase" />
+						<span className="min-w-0 truncate">
+							{application.company} · {application.role}
+						</span>
+					</CommandItem>
+				))
+			)}
+		</BaseCommandGroup>
+	);
+}
+
+function ThreadsPage({ page }: SearchPageProps) {
+	const reset = useCommandPaletteStore((state) => state.reset);
+	const search = useCommandPaletteStore((state) => state.search);
+	const { data: threads, isLoading } = useQuery(orpc.agent.threads.list.queryOptions());
+	const filteredThreads = (threads ?? [])
+		.filter((thread) => thread.scope === "document")
+		.filter((thread) => matchesSearch(search, [thread.title, thread.resumeName, thread.coverLetterName]));
+
+	return (
+		<BaseCommandGroup page={page} heading={<Trans>Assistant conversations</Trans>}>
+			{isLoading ? (
+				<CommandLoading>
+					<Trans>Loading conversations…</Trans>
+				</CommandLoading>
+			) : (
+				filteredThreads.map((thread) => <ThreadItem key={thread.id} thread={thread} onOpen={reset} />)
+			)}
+		</BaseCommandGroup>
+	);
+}
+
+type ThreadItemProps = { thread: Thread; onOpen: () => void };
+
+/** A conversation opens its document with the assistant showing it. */
+function ThreadItem({ thread, onOpen }: ThreadItemProps) {
+	const navigate = useNavigate();
+	const documentName = thread.coverLetterName ?? thread.resumeName ?? "";
+	const open = async () => {
+		if (thread.coverLetterId)
+			await navigate({
+				to: "/builder/letter/$coverLetterId",
+				params: { coverLetterId: thread.coverLetterId },
+				search: { assistant: thread.id },
+			});
+		else if (thread.workingResumeId)
+			await navigate({
+				to: "/builder/$resumeId",
+				params: { resumeId: thread.workingResumeId },
+				search: { assistant: thread.id },
+			});
+		onOpen();
+	};
+
+	return (
+		<CommandItem value={`thread.${thread.id}`} keywords={[thread.title, documentName]} onSelect={() => void open()}>
+			<Icon name="chat-text" />
+			<span className="min-w-0 truncate">{thread.title}</span>
+			<RowNote>{documentName}</RowNote>
+		</CommandItem>
+	);
+}

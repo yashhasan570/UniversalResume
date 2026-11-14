@@ -1,0 +1,173 @@
+import type { MessageDescriptor, Messages } from "@lingui/core";
+import type { Locale } from "@universal-resume/utils/locale";
+import { i18n } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import Cookies from "js-cookie";
+import {
+	defaultLocale,
+	getPreferredLocale,
+	isLocale,
+	localeSchema,
+	localizedUrl,
+	supportedLocales,
+} from "@universal-resume/utils/locale";
+
+const storageKey = "locale";
+const persistLocale = (locale: Locale) => Cookies.set(storageKey, locale, { expires: 365, path: "/", sameSite: "lax" });
+const messageLoaders = import.meta.glob<{ messages: Messages }>("../../locales/*.po");
+const relativeTimeDivisions: Array<{ amount: number; unit: Intl.RelativeTimeFormatUnit }> = [
+	{ amount: 31_536_000_000, unit: "year" },
+	{ amount: 2_592_000_000, unit: "month" },
+	{ amount: 604_800_000, unit: "week" },
+	{ amount: 86_400_000, unit: "day" },
+	{ amount: 3_600_000, unit: "hour" },
+	{ amount: 60_000, unit: "minute" },
+];
+
+export const localeMap = {
+	"af-ZA": msg`Afrikaans`,
+	"am-ET": msg`Amharic`,
+	"ar-SA": msg`Arabic`,
+	"az-AZ": msg`Azerbaijani`,
+	"bg-BG": msg`Bulgarian`,
+	"bn-BD": msg`Bengali`,
+	"ca-ES": msg`Catalan`,
+	"cs-CZ": msg`Czech`,
+	"da-DK": msg`Danish`,
+	"de-DE": msg`German`,
+	"el-GR": msg`Greek`,
+	"en-US": msg`English`,
+	"en-GB": msg`English (United Kingdom)`,
+	"es-ES": msg`Spanish`,
+	"fa-IR": msg`Persian`,
+	"fi-FI": msg`Finnish`,
+	"fr-FR": msg`French`,
+	"he-IL": msg`Hebrew`,
+	"hi-IN": msg`Hindi`,
+	"hu-HU": msg`Hungarian`,
+	"hy-AM": msg`Armenian`,
+	"id-ID": msg`Indonesian`,
+	"it-IT": msg`Italian`,
+	"ja-JP": msg`Japanese`,
+	"km-KH": msg`Khmer`,
+	"kn-IN": msg`Kannada`,
+	"ko-KR": msg`Korean`,
+	"lt-LT": msg`Lithuanian`,
+	"lv-LV": msg`Latvian`,
+	"ml-IN": msg`Malayalam`,
+	"mr-IN": msg`Marathi`,
+	"ms-MY": msg`Malay`,
+	"ne-NP": msg`Nepali`,
+	"nl-NL": msg`Dutch`,
+	"no-NO": msg`Norwegian`,
+	"or-IN": msg`Odia`,
+	"pl-PL": msg`Polish`,
+	"pt-BR": msg`Portuguese (Brazil)`,
+	"pt-PT": msg`Portuguese (Portugal)`,
+	"ro-RO": msg`Romanian`,
+	"ru-RU": msg`Russian`,
+	"sk-SK": msg`Slovak`,
+	"sl-SI": msg`Slovenian`,
+	"sq-AL": msg`Albanian`,
+	"sr-SP": msg`Serbian`,
+	"sv-SE": msg`Swedish`,
+	"ta-IN": msg`Tamil`,
+	"te-IN": msg`Telugu`,
+	"th-TH": msg`Thai`,
+	"tr-TR": msg`Turkish`,
+	"uk-UA": msg`Ukrainian`,
+	"uz-UZ": msg`Uzbek`,
+	"vi-VN": msg`Vietnamese`,
+	"zh-CN": msg`Chinese (Simplified)`,
+	"zh-TW": msg`Chinese (Traditional)`,
+	"zu-ZA": msg`Zulu`,
+} satisfies Record<Locale, MessageDescriptor>;
+
+export const selectableLocales = import.meta.env.DEV ? localeSchema.options : supportedLocales;
+
+export const resolveLocale = (locale: string): Locale => {
+	return isLocale(locale) && selectableLocales.includes(locale) ? locale : defaultLocale;
+};
+
+// Changing the locale reloads the page (`changeLocale`), so one formatter per locale is enough.
+const relativeTimeFormatters = new Map<string, Intl.RelativeTimeFormat>();
+
+function getRelativeTimeFormatter(locale: string, style: Intl.RelativeTimeFormatStyle = "long") {
+	const key = `${locale}:${style}`;
+	let formatter = relativeTimeFormatters.get(key);
+	if (!formatter) {
+		formatter = new Intl.RelativeTimeFormat(locale, { numeric: "auto", style });
+		relativeTimeFormatters.set(key, formatter);
+	}
+	return formatter;
+}
+
+/** "20 minutes ago"; with `short`, "20 min. ago", for narrow places such as a document card. */
+export function formatRelativeTime(value: Date | string, locale: string, style: Intl.RelativeTimeFormatStyle = "long") {
+	const formatter = getRelativeTimeFormatter(locale, style);
+	const date = value instanceof Date ? value : new Date(value);
+	const diffMs = date.getTime() - Date.now();
+	if (Number.isNaN(diffMs)) return formatter.format(0, "second");
+
+	const division = relativeTimeDivisions.find((candidate) => Math.abs(diffMs) >= candidate.amount);
+
+	return division
+		? formatter.format(Math.round(diffMs / division.amount), division.unit)
+		: formatter.format(0, "second");
+}
+
+export const hasLocalePreference = () =>
+	isLocale(new URLSearchParams(window.location.search).get(storageKey)) || Cookies.get(storageKey) !== undefined;
+
+export const getLocale = (accountLocale?: unknown) => {
+	// A `?locale=` address (the homepage's hreflang alternates) picks the language and keeps it, like the switcher.
+	const requested = new URLSearchParams(window.location.search).get(storageKey);
+	if (isLocale(requested)) {
+		const locale = resolveLocale(requested);
+		persistLocale(locale);
+		return locale;
+	}
+
+	const saved = Cookies.get(storageKey);
+	if (saved !== undefined) return resolveLocale(saved);
+	if (isLocale(accountLocale) && selectableLocales.includes(accountLocale)) return accountLocale;
+	// Browser hints affect the app only; neither persist them nor vary shared server HTML by Accept-Language.
+	return getPreferredLocale(navigator.languages ?? []);
+};
+
+const loadMessages = async (locale: Locale) => {
+	const load = messageLoaders[`../../locales/${locale}.po`];
+
+	if (!load) throw new Error(`Unknown locale: ${locale}`);
+
+	const { messages } = await load();
+	return messages;
+};
+
+export const getLocaleMessages = async (locale: string) => {
+	const resolvedLocale = resolveLocale(locale);
+	let messages: Messages;
+
+	try {
+		messages = await loadMessages(resolvedLocale);
+		return { locale: resolvedLocale, messages };
+	} catch {
+		messages = await loadMessages(defaultLocale);
+		return { locale: defaultLocale, messages };
+	}
+};
+
+export const loadLocale = async (locale: string, current = () => true) => {
+	// Re-activating the active locale emits "change" and re-renders every translated component.
+	if (i18n.locale === locale) return;
+	const { locale: resolvedLocale, messages } = await getLocaleMessages(locale);
+	if (current()) i18n.loadAndActivate({ locale: resolvedLocale, messages });
+};
+
+export const changeLocale = (value: string | null) => {
+	if (!value || !isLocale(value)) return;
+	const locale = resolveLocale(value);
+	persistLocale(locale);
+	window.history.replaceState(window.history.state, "", localizedUrl(window.location.href, locale));
+	window.location.reload();
+};

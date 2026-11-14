@@ -1,0 +1,182 @@
+import type { DialogProps } from "../store";
+import { t } from "@lingui/core/macro";
+import { Trans } from "@lingui/react/macro";
+import { useMutation } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
+import { useRef } from "react";
+import z from "zod";
+import { Button } from "@universal-resume/ui/components/button";
+import {
+	DialogClose,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@universal-resume/ui/components/dialog";
+import { FormControl, FormDescription, FormItem, FormLabel, FormMessage } from "@universal-resume/ui/components/form";
+import { Input } from "@universal-resume/ui/components/input";
+import { toast } from "@universal-resume/ui/components/toast";
+import { useDialogStore } from "../store";
+import { ChipInput } from "@/components/input/chip-input";
+import { useExistingTags } from "@/features/documents/tag-suggestions";
+import { saveResumeMetadata } from "@/features/resume/builder/draft";
+import { useFormBlocker } from "@/hooks/use-form-blocker";
+import { getResumeErrorMessage } from "@/libs/error-message";
+import { orpc } from "@/libs/orpc/client";
+import { useAppForm } from "@/libs/tanstack-form";
+
+const formSchema = z.object({
+	id: z.string(),
+	name: z.string().trim().min(1).max(100),
+	tags: z.array(z.string()),
+});
+
+type ResumeDialogProps = {
+	mode: "update" | "duplicate";
+	data: DialogProps<"resume.update">["data"];
+};
+
+export function ResumeDialog({ mode, data }: ResumeDialogProps) {
+	const isUpdate = mode === "update";
+	const commitTags = useRef<(() => string[]) | null>(null);
+	const navigate = useNavigate();
+	const closeDialog = useDialogStore((state) => state.closeDialog);
+	const suggestions = useExistingTags(["resume"]);
+
+	const updateOptions = orpc.resume.update.mutationOptions();
+	const update = useMutation({
+		...updateOptions,
+		mutationFn: (value) =>
+			saveResumeMetadata(value.id, (expectedUpdatedAt, options) =>
+				orpc.resume.update.call({ ...value, expectedUpdatedAt }, options),
+			),
+	});
+	const duplicate = useMutation(orpc.resume.duplicate.mutationOptions());
+
+	const form = useAppForm({
+		defaultValues: {
+			id: data.id,
+			name: data.name,
+			tags: data.tags,
+		},
+		validators: { onSubmit: formSchema },
+		onSubmit: ({ value }) => {
+			const toastId = toast.add({
+				type: "loading",
+				description: isUpdate ? t`Updating your resume…` : t`Duplicating your resume…`,
+			});
+			const onError = (error: unknown) => {
+				toast.add({ type: "error", description: getResumeErrorMessage(error), id: toastId });
+			};
+
+			if (isUpdate) {
+				update.mutate(value, {
+					onSuccess: () => {
+						toast.add({ type: "success", description: t`Your resume has been updated.`, id: toastId });
+						closeDialog();
+					},
+					onError,
+				});
+				return;
+			}
+
+			duplicate.mutate(value, {
+				onSuccess: (id) => {
+					toast.add({ type: "success", description: t`Your resume has been duplicated.`, id: toastId });
+					closeDialog();
+
+					void navigate({ to: "/builder/$resumeId", params: { resumeId: id } });
+				},
+				onError,
+			});
+		},
+	});
+
+	useFormBlocker(form);
+
+	return (
+		<DialogContent closeLabel={t`Close`}>
+			<DialogHeader>
+				<DialogTitle>{isUpdate ? <Trans>Edit resume</Trans> : <Trans>Duplicate resume</Trans>}</DialogTitle>
+				{!isUpdate && (
+					<DialogDescription>
+						<Trans>Duplicate your resume to create a new one, just like the original.</Trans>
+					</DialogDescription>
+				)}
+			</DialogHeader>
+
+			<form
+				className="space-y-4"
+				onSubmit={(event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					commitTags.current?.();
+					void form.handleSubmit();
+				}}
+			>
+				<form.Field name="name">
+					{(field) => (
+						<FormItem hasError={field.state.meta.isTouched && field.state.meta.errors.length > 0}>
+							<FormLabel>
+								<Trans>Name</Trans>
+							</FormLabel>
+							<FormControl
+								render={
+									<Input
+										minLength={1}
+										maxLength={100}
+										name={field.name}
+										value={field.state.value}
+										onBlur={field.handleBlur}
+										onChange={(event) => field.handleChange(event.target.value)}
+									/>
+								}
+							/>
+							<FormMessage errors={field.state.meta.errors} />
+							<FormDescription>
+								<Trans>Name the resume after the position you are applying for.</Trans>
+							</FormDescription>
+						</FormItem>
+					)}
+				</form.Field>
+
+				<form.Field name="tags">
+					{(field) => (
+						<FormItem hasError={field.state.meta.isTouched && field.state.meta.errors.length > 0}>
+							<FormLabel>
+								<Trans>Tags</Trans>
+							</FormLabel>
+							<FormControl
+								render={
+									<ChipInput
+										commitRef={commitTags}
+										value={field.state.value}
+										onChange={(value) => {
+											field.handleChange(value);
+										}}
+										suggestions={suggestions}
+										suggestionsLabel={t`Your tags`}
+									/>
+								}
+							/>
+							<FormMessage errors={field.state.meta.errors} />
+							<FormDescription>
+								<Trans>Tags can be used to categorize your resume by keywords.</Trans>
+							</FormDescription>
+						</FormItem>
+					)}
+				</form.Field>
+
+				<DialogFooter>
+					<DialogClose render={<Button type="button" variant="ghost" />}>
+						<Trans>Cancel</Trans>
+					</DialogClose>
+					<Button type="submit" disabled={update.isPending || duplicate.isPending}>
+						{isUpdate ? <Trans>Save changes</Trans> : <Trans>Duplicate</Trans>}
+					</Button>
+				</DialogFooter>
+			</form>
+		</DialogContent>
+	);
+}

@@ -1,0 +1,636 @@
+import type { GenerateTask, WorkspaceTab } from "@universal-resume/schema/career";
+import type { IconName } from "@universal-resume/ui/components/icon";
+import type { PreparedRequest } from "@universal-resume/utils/deferred-request";
+import type { QueryClient, QueryKey } from "@tanstack/react-query";
+import type { ComponentProps, ReactNode } from "react";
+import { t } from "@lingui/core/macro";
+import { useLingui } from "@lingui/react";
+import { Trans } from "@lingui/react/macro";
+import { Link, useRouteContext } from "@tanstack/react-router";
+import { AnimatePresence, m } from "motion/react";
+import { createContext, useContext, useEffect, useState } from "react";
+import { Button } from "@universal-resume/ui/components/button";
+import { Checkbox } from "@universal-resume/ui/components/checkbox";
+import { Icon } from "@universal-resume/ui/components/icon";
+import { toast } from "@universal-resume/ui/components/toast";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@universal-resume/ui/components/tooltip";
+import { cn } from "@universal-resume/utils/style";
+import { pendingCommits } from "./pending-commits";
+import { IconTile, List, ListRow } from "@/components/calm/list-row";
+import { deviceTimeZone } from "@/features/settings/use-save-timezone";
+import { getAccountGeneration } from "@/libs/auth/account-scope";
+import { getOrpcErrorMessage } from "@/libs/error-message";
+import { D2, EASE, EXIT } from "@/libs/motion";
+import { invalidateMutationQueries } from "@/libs/query/client";
+
+// ---- Time: always in the user's timezone, "Thu 8 Oct, 17:58". Relative time is secondary text. ----
+
+/** The current time, ticking once a minute (countdowns, the Prepare switch to "10 minutes before"). */
+export function useNow(intervalMs = 60_000) {
+	const [now, setNow] = useState(() => new Date());
+	useEffect(() => {
+		const id = window.setInterval(() => setNow(new Date()), intervalMs);
+		return () => window.clearInterval(id);
+	}, [intervalMs]);
+	return now;
+}
+
+const capitalize = (text: string) => text.charAt(0).toLocaleUpperCase() + text.slice(1);
+
+/** Inside it, the page names the timezone once (Today's note under the date), so clock times carry no zone. */
+const ZoneNamed = createContext(false);
+export function ZoneNamedOnPage({ children }: { children: ReactNode }) {
+	return <ZoneNamed.Provider value>{children}</ZoneNamed.Provider>;
+}
+
+/** Formatters in the user's timezone (Settings → Preferences) and interface locale. */
+export function useCareerTime() {
+	const { i18n } = useLingui();
+	const { session } = useRouteContext({ strict: false });
+	const timeZone = session?.user.timezone ?? "UTC";
+	const locale = i18n.locale;
+	const zoneNamed = useContext(ZoneNamed);
+	const device = deviceTimeZone();
+	const differs = !!device && device !== timeZone;
+	// When the account's timezone isn't this device's, clock times say which zone they're in ("16:56 UTC"), unless
+	// the page already said it once.
+	const labelled = differs && !zoneNamed;
+	const format = (value: Date | string, options: Intl.DateTimeFormatOptions) =>
+		new Intl.DateTimeFormat(locale, { timeZone, ...options }).format(new Date(value));
+	// The locale decides 12- or 24-hour, as the interview dialog's own time field does.
+	const plain = (value: Date | string) => format(value, { hour: "2-digit", minute: "2-digit" });
+	const clock = (value: Date | string) =>
+		labelled ? format(value, { hour: "2-digit", minute: "2-digit", timeZoneName: "short" }) : plain(value);
+
+	return {
+		timeZone,
+		/** This device's timezone, when it differs from the account's: times then carry their zone. */
+		deviceTimeZone: differs ? device : undefined,
+		locale,
+		/** "Thu 8 Oct, 17:58" ("Thu 8 Oct, 17:58 UTC" when the account's timezone isn't this device's) */
+		when: (value: Date | string) =>
+			`${format(value, { weekday: "short", day: "numeric", month: "short" })}, ${clock(value)}`,
+		/** "Thu 8 Oct" */
+		day: (value: Date | string) => format(value, { weekday: "short", day: "numeric", month: "short" }),
+		/** "25 Sep" */
+		date: (value: Date | string) => format(value, { day: "numeric", month: "short" }),
+		/** "17:58" ("17:58 UTC" when the account's timezone isn't this device's) */
+		time: clock,
+		/** "17:58" with no zone, where space is short and the zone is said once nearby. */
+		plainTime: plain,
+		/** "17:58 – 18:58", with the zone once at the end when the account's timezone isn't this device's. */
+		timeRange: (start: Date | string, end: Date | string) => `${plain(start)} – ${clock(end)}`,
+		format,
+		/** "In 23 hours", "Yesterday": the largest whole unit. */
+		relative: (value: Date | string, now = new Date()) => {
+			const seconds = (new Date(value).getTime() - now.getTime()) / 1000;
+			const units: [Intl.RelativeTimeFormatUnit, number][] = [
+				["day", 86_400],
+				["hour", 3600],
+				["minute", 60],
+			];
+			const [unit, size] = units.find(([, size]) => Math.abs(seconds) >= size) ?? ["minute", 60];
+			return capitalize(
+				new Intl.RelativeTimeFormat(locale, { numeric: "auto" }).format(Math.round(seconds / size), unit),
+			);
+		},
+	};
+}
+
+// ---- Undo over confirm: hide now, commit when the toast closes unless Undo was pressed. ----
+
+type LocalUndo = {
+	description: string;
+	commit: () => unknown;
+	onUndo: () => unknown;
+};
+
+type UndoInput<T> = { description: string; onUndo: () => unknown } & (
+	| { commit: () => unknown }
+	| {
+			prepare: () => Promise<PreparedRequest<T>>;
+			onReady: () => void;
+			commit: (result: Promise<T>) => unknown;
+			onPrepareError: (error: unknown) => unknown;
+	  }
+);
+
+/** Network actions finish preparing before their Undo notice; erasure still waits until its window closes. */
+export function withUndo<T>(input: UndoInput<T>) {
+	if (!("prepare" in input)) {
+		showUndo(input);
+		return;
+	}
+	const generation = getAccountGeneration();
+	const current = () => generation === getAccountGeneration();
+	let preparing: Promise<PreparedRequest<T>>;
+	try {
+		preparing = input.prepare();
+	} catch (error) {
+		if (current()) void input.onPrepareError(error);
+		return;
+	}
+	void preparing.then(
+		(request) => {
+			if (!current()) {
+				request.cancel();
+				return;
+			}
+			input.onReady();
+			const operation = showUndo({
+				description: input.description,
+				onUndo: () => {
+					request.cancel();
+					if (current()) void input.onUndo();
+				},
+				commit: () => {
+					if (current()) void input.commit(request.send());
+					else request.cancel();
+				},
+			});
+			if (document.visibilityState === "hidden") operation.flush();
+		},
+		(error) => {
+			if (current()) void input.onPrepareError(error);
+		},
+	);
+}
+
+function showUndo({ description, commit, onUndo }: LocalUndo) {
+	let settled = false;
+	const settle = (run: boolean) => {
+		if (settled) return false;
+		settled = true;
+		pendingCommits.delete(flush);
+		if (run) void commit();
+		return true;
+	};
+	const flush = () => {
+		if (settle(true)) toast.close(id);
+	};
+	const id = toast.add({
+		description,
+		actionProps: {
+			children: t`Undo`,
+			onClick: () => {
+				if (!settle(false)) return;
+				onUndo();
+				toast.close(id);
+			},
+		},
+		onClose: () => settle(true),
+	});
+	pendingCommits.add(flush);
+	return { flush };
+}
+
+type QueryUndoOptions<T> = {
+	queryClient: QueryClient;
+	queryKey: QueryKey;
+	description: string;
+	errorMessage: string;
+	prepare: () => Promise<PreparedRequest<T>>;
+	hide: () => void;
+	restore: () => void;
+};
+
+/** Only canonical readback may reveal a hidden row; retry never writes erased text back. */
+export function withQueryUndo<T>({
+	queryClient,
+	queryKey,
+	description,
+	errorMessage,
+	prepare,
+	hide,
+	restore,
+}: QueryUndoOptions<T>) {
+	const generation = getAccountGeneration();
+	const current = () => generation === getAccountGeneration();
+	const reconcile = async () => {
+		if (!current()) return;
+		await queryClient.cancelQueries({ queryKey });
+		if (!current()) return;
+		try {
+			await queryClient.invalidateQueries({ queryKey, refetchType: "all" }, { throwOnError: true });
+			if (current()) restore();
+		} finally {
+			// A refreshed list can hydrate detail and cancel its read, so settle the canonical target first.
+			if (current()) void invalidateMutationQueries(queryClient, queryKey);
+		}
+	};
+	const report = (error: unknown, fallback = t`Couldn't load. Try again.`) => {
+		if (!current()) return;
+		toast.add({
+			type: "error",
+			description: getOrpcErrorMessage(error, { fallback }),
+			actionProps: {
+				children: t`Retry`,
+				onClick: () => {
+					void reconcile().catch(report);
+				},
+			},
+		});
+	};
+	const failed = (error: unknown) => {
+		report(error, errorMessage);
+		void reconcile().catch(report);
+	};
+	withUndo({
+		description,
+		prepare,
+		onReady: hide,
+		onPrepareError: failed,
+		onUndo: () => reconcile().catch(report),
+		commit: (result) => result.then(() => reconcile().catch(report), failed),
+	});
+}
+
+/** Tints a row accent-soft and fades it over 1.2s after navigating to it ("View", "Review"). */
+export function flash(element: Element | null) {
+	if (!element) return;
+	element.scrollIntoView({ block: "nearest", behavior: "smooth" });
+	if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+		element.animate([{ outline: "2px solid var(--accent)" }, { outline: "2px solid var(--accent)" }], 1200);
+		return;
+	}
+	element.animate([{ backgroundColor: "var(--accent-soft)" }, { backgroundColor: "transparent" }], {
+		duration: 1200,
+		easing: "ease-out",
+	});
+}
+
+// ---- Motion: rows that leave collapse; panels that swap crossfade. ----
+
+/** A list row that collapses (height and opacity) when it leaves. Wrap the list in `<AnimatePresence initial={false}>`. */
+export function CollapseRow({ children, className, ...props }: ComponentProps<typeof m.div>) {
+	return (
+		<m.div
+			layout="position"
+			initial={{ height: 0, opacity: 0 }}
+			animate={{ height: "auto", opacity: 1, transition: { duration: D2, ease: EASE } }}
+			exit={{ height: 0, opacity: 0, transition: { duration: D2 * EXIT, ease: EASE } }}
+			className={cn("overflow-hidden", className)}
+			{...props}
+		>
+			{children}
+		</m.div>
+	);
+}
+
+/** Content that appears in place of other content (actions → success line, text → editor): a 200ms crossfade. */
+export function Swap({ id, children, className }: { id: string; children: ReactNode; className?: string }) {
+	return (
+		<AnimatePresence mode="popLayout" initial={false}>
+			<m.div
+				key={id}
+				initial={{ opacity: 0, filter: "blur(2px)" }}
+				animate={{ opacity: 1, filter: "blur(0px)", transition: { duration: D2, ease: EASE } }}
+				exit={{ opacity: 0, filter: "blur(2px)", transition: { duration: D2 * EXIT, ease: EASE } }}
+				className={className}
+			>
+				{children}
+			</m.div>
+		</AnimatePresence>
+	);
+}
+
+// ---- Workspace tabs ----
+
+export const tabLabel = (tab: WorkspaceTab) =>
+	({
+		fit: t({ message: "Fit", context: "Application workspace tab: how well a job fits your experience" }),
+		apply: t`Apply`,
+		prepare: t({ message: "Interview prep", context: "Application workspace tab: plan for an interview" }),
+		practise: t({ message: "Practice", context: "Application workspace tab: rehearse interview answers" }),
+		debrief: t`Debrief`,
+		messages: t`Messages`,
+		saved: t({ message: "Library", context: "Application workspace tab: earlier results kept for this job" }),
+	})[tab];
+
+// ---- Long AI work: what the coach is doing, one phrase at a time ----
+
+/** What each piece of tab work goes through, in order, before the general phrases take over. */
+export const workingSteps = (task: GenerateTask["task"] | "tighten" | "chat") =>
+	({
+		fit: [t`Reading the posting`, t`Matching your facts`, t`Weighing each requirement`, t`Checking your preferences`],
+		briefing: [t`Reading the posting`, t`Picking your stories`, t`Timing the plan`, t`Drafting questions`],
+		practice: [t`Reading your answer`, t`Finding what works`, t`Sharpening the opening`],
+		debrief: [t`Reading your notes`, t`Checking against Knowledge`, t`Planning your week`],
+		reply: [t`Reading the message`, t`Spotting what changed`, t`Drafting a reply`],
+		answer: [t`Reading the question`, t`Drafting`],
+		tighten: [t`Tightening`, t`Trimming words`],
+		chat: [t`Thinking`, t`Reading what you shared`],
+	})[task];
+
+type WorkingProps = { steps: string[] };
+
+/**
+ * A 10–30 second wait reads as progress: the label moves through the work's steps every 2.2 seconds, then stays on
+ * "Still working". Each phrase rises in from below out of a 2px blur as the last one leaves upward; all of them share
+ * one grid cell, so a button keeps the width of the longest.
+ */
+export function Working({ steps }: WorkingProps) {
+	const phrases = [...steps, t`Still working`];
+	const [tick, setTick] = useState(0);
+	useEffect(() => {
+		const id = window.setInterval(() => setTick((current) => current + 1), 2200);
+		return () => window.clearInterval(id);
+	}, []);
+	const at = (n: number) => Math.min(n, phrases.length - 1);
+	const shown = at(tick);
+	const left = tick > 0 ? at(tick - 1) : -1;
+
+	return (
+		<span className="inline-grid">
+			<span className="sr-only">{phrases[0]}…</span>
+			{phrases.map((phrase, index) => (
+				<span
+					key={index}
+					aria-hidden="true"
+					className={cn(
+						"col-start-1 row-start-1 transition-[opacity,translate,filter] duration-standard ease-enter motion-reduce:translate-y-0 motion-reduce:blur-none",
+						index === shown
+							? ""
+							: index === left
+								? "-translate-y-1 opacity-0 blur-[2px]"
+								: "translate-y-1 opacity-0 blur-[2px]",
+					)}
+				>
+					{phrase}…
+				</span>
+			))}
+		</span>
+	);
+}
+
+type GenerateNoticeProps = {
+	generate: { isPending: boolean; failure: string | null; stop: () => void; reset: () => void };
+	onRetry: () => void;
+	className?: string;
+};
+
+/** Beside a workspace AI action: Stop while it runs; when it failed, the reason inline with Try again. */
+export function GenerateNotice({ generate, onRetry, className }: GenerateNoticeProps) {
+	if (generate.isPending)
+		return (
+			<Button size="sm" variant="ghost" className={className} onClick={generate.stop}>
+				<Icon name="stop" size={16} />
+				<Trans>Stop</Trans>
+			</Button>
+		);
+	if (!generate.failure) return null;
+	return (
+		<div
+			role="alert"
+			className={cn("grid gap-2.5 rounded-xl bg-danger-soft p-3 text-start text-[13px] text-danger-text", className)}
+		>
+			<span className="flex gap-2">
+				<Icon name="warning-circle" size={18} className="shrink-0" />
+				{generate.failure}
+			</span>
+			<div className="flex flex-wrap gap-1.5">
+				<Button size="sm" variant="secondary" onClick={onRetry}>
+					<Trans>Try again</Trans>
+				</Button>
+				<Button size="sm" variant="ghost" nativeButton={false} render={<Link to="/dashboard/settings/ai" />}>
+					<Trans>AI settings</Trans>
+				</Button>
+				<Button size="sm" variant="ghost" onClick={generate.reset}>
+					<Trans>Dismiss</Trans>
+				</Button>
+			</div>
+		</div>
+	);
+}
+
+// ---- Small parts ----
+
+/** "NEXT STEP", "SCHEDULES": 12px semibold ink-3. */
+type EyebrowProps = { children: ReactNode; className?: string };
+export function Eyebrow({ children, className }: EyebrowProps) {
+	return <h2 className={cn("text-xs font-semibold text-ink-3", className)}>{children}</h2>;
+}
+
+type FilterChipProps = { pressed: boolean; onClick: () => void; children: ReactNode; className?: string };
+
+/** A 30px pill toggle for filters and single choices; selected is ink-filled. */
+export function FilterChip({ pressed, onClick, children, className }: FilterChipProps) {
+	return (
+		<button
+			type="button"
+			aria-pressed={pressed}
+			onClick={onClick}
+			className={cn(
+				"touch-target relative inline-flex h-[30px] items-center rounded-sm border px-2.5 text-xs font-medium transition-[background-color,border-color,color,scale] duration-quick ease-enter active:scale-[0.97]",
+				// Accent marks a selection, as in the template filter (DESIGN.md).
+				pressed ? "border-accent bg-accent-soft text-accent-text" : "border-line-2 text-ink hover:bg-hover",
+				className,
+			)}
+		>
+			{children}
+		</button>
+	);
+}
+
+type ContextChipProps = {
+	pressed: boolean;
+	onPressedChange: (pressed: boolean) => void;
+	label: string;
+	tooltip: string;
+	/** What the chip stands for, shown while it's on. */
+	icon?: IconName;
+	/** Shown when off instead of `plus`; Web research uses a globe. */
+	offIcon?: IconName;
+	/** "on": the workspace sheet's accent chip without a remove mark (W12); default: Career's sunken chip. */
+	tone?: "ctx" | "on";
+};
+
+/** Composer context switches: on is a sunken chip with its remove mark, off is a dashed offer to add it. */
+export function ContextChip({
+	pressed,
+	onPressedChange,
+	label,
+	tooltip,
+	icon,
+	offIcon = "plus",
+	tone = "ctx",
+}: ContextChipProps) {
+	const on = tone === "on";
+	return (
+		<Tooltip>
+			<TooltipTrigger
+				render={
+					<button
+						type="button"
+						aria-pressed={pressed}
+						onClick={() => onPressedChange(!pressed)}
+						className={cn(
+							"touch-target relative inline-flex items-center gap-1.5 rounded-sm font-medium whitespace-nowrap transition-colors duration-quick",
+							on ? "h-7 text-[13px]/[18px]" : "h-[26px] text-xs/[18px]",
+							pressed
+								? on
+									? "bg-accent-soft px-2.5 text-accent-text"
+									: "bg-sunken ps-2 pe-1.5 text-ink-2 hover:text-ink"
+								: "border border-dashed border-line-2 px-2 text-ink-3 hover:text-ink-2",
+						)}
+					/>
+				}
+			>
+				<Icon name={pressed ? (icon ?? "check") : offIcon} size={16} />
+				{label}
+				{pressed && !on && <Icon name="x" size={16} className="text-ink-3" />}
+			</TooltipTrigger>
+			<TooltipContent>{tooltip}</TooltipContent>
+		</Tooltip>
+	);
+}
+
+/** Names exactly what an AI action sends, and where. `cost` adds the provider-may-charge callout. */
+export function PrivacyLine({
+	children,
+	cost,
+	className,
+}: {
+	children: ReactNode;
+	cost?: boolean;
+	className?: string;
+}) {
+	if (cost)
+		return (
+			<p
+				className={cn(
+					"flex gap-2 rounded-lg bg-warn-soft px-3 py-2.5 text-[13px] leading-[19px] text-warn-text",
+					className,
+				)}
+			>
+				<Icon name="key" size={16} className="mt-px shrink-0" />
+				<span>{children}</span>
+			</p>
+		);
+	return (
+		<p className={cn("flex gap-1.5 text-xs leading-[17px] text-ink-3", className)}>
+			<Icon name="lock" size={15} className="shrink-0" />
+			<span>{children}</span>
+		</p>
+	);
+}
+
+/** Whole minutes until `at`; negative once it has started. */
+export const minutesUntil = (at: Date, now: Date) => Math.round((at.getTime() - now.getTime()) / 60_000);
+
+type MemoryProposalProps = {
+	/** "Remember this for future coaching?" or "Remember for Northstar only?" */
+	question: string;
+	facts: string[];
+	state: "pending" | "remembered" | "dismissed";
+	/** Shown after Remember: "Added to Knowledge as a preference." */
+	remembered: ReactNode;
+	onRemember: (selected: number[]) => void;
+	onDismiss: () => void;
+	busy?: boolean;
+	/** "row": a list row with an icon tile (W5 Debrief); default: a card (coach answers). */
+	variant?: "card" | "row";
+	/** The card's quiet note at the end of its actions: "Private to this application" (W12). */
+	note?: ReactNode;
+};
+
+/** Offers to remember durable facts from an answer. Several facts become a checklist inside one proposal. */
+export function MemoryProposal(props: MemoryProposalProps) {
+	const [selected, setSelected] = useState(() => props.facts.map((_, index) => index));
+	if (props.state === "dismissed") return null;
+	return (
+		<Swap id={props.state}>
+			{props.state === "remembered" ? (
+				<p className="flex items-center gap-1.5 text-sm text-accent-text">
+					<Icon name="check-circle" size={18} />
+					{props.remembered}
+				</p>
+			) : props.variant === "row" ? (
+				<List cap className="mt-[18px]">
+					<ListRow
+						className="flex-wrap"
+						leading={
+							<IconTile>
+								<Icon name="bookmark-simple" size={20} />
+							</IconTile>
+						}
+						title={props.question}
+						subtitle={
+							props.facts.length === 1 ? (
+								<q>{props.facts[0]}</q>
+							) : (
+								props.facts.map((fact, index) => (
+									<label key={fact} className="flex items-start gap-2 pt-1">
+										<Checkbox
+											checked={selected.includes(index)}
+											onCheckedChange={(checked) =>
+												setSelected((current) =>
+													checked ? [...current, index] : current.filter((item) => item !== index),
+												)
+											}
+										/>
+										<q>{fact}</q>
+									</label>
+								))
+							)
+						}
+						trailing={
+							<span className="flex items-center gap-3">
+								<Button
+									variant="link"
+									className="h-auto p-0 text-sm/5 font-medium text-accent-text"
+									loading={props.busy ?? false}
+									disabled={selected.length === 0}
+									onClick={() => props.onRemember(selected)}
+								>
+									<Trans>Remember</Trans>
+								</Button>
+								<Button size="sm" variant="ghost" onClick={props.onDismiss}>
+									<Trans>Not now</Trans>
+								</Button>
+							</span>
+						}
+					/>
+				</List>
+			) : (
+				<div className="grid gap-2.5 rounded-lg border border-line bg-raised p-3.5">
+					<p className="t-label text-sm">{props.question}</p>
+					{props.facts.length === 1 ? (
+						<q className="t-ui text-ink-2">{props.facts[0]}</q>
+					) : (
+						props.facts.map((fact, index) => (
+							<label key={fact} className="flex items-start gap-2 t-ui text-ink-2">
+								<Checkbox
+									checked={selected.includes(index)}
+									onCheckedChange={(checked) =>
+										setSelected((current) => (checked ? [...current, index] : current.filter((item) => item !== index)))
+									}
+								/>
+								<q>{fact}</q>
+							</label>
+						))
+					)}
+					<div className="flex flex-wrap items-center gap-x-1 gap-y-2">
+						<Button
+							size="sm"
+							variant="secondary"
+							loading={props.busy ?? false}
+							disabled={selected.length === 0}
+							onClick={() => props.onRemember(selected)}
+						>
+							<Trans>Remember</Trans>
+						</Button>
+						<Button size="sm" variant="ghost" onClick={props.onDismiss}>
+							<Trans>Not now</Trans>
+						</Button>
+						{props.note && <span className="ms-auto text-xs text-ink-3">{props.note}</span>}
+					</div>
+				</div>
+			)}
+		</Swap>
+	);
+}
+
+/** A meeting place in the middle of a sentence ("· video call."): the generic kinds read in lower case. */
+export const midSentence = (place: string | undefined) =>
+	place && /^(video|phone) call$/i.test(place.trim()) ? place.trim().toLocaleLowerCase() : place;

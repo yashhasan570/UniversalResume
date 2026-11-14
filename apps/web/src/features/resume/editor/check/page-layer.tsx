@@ -1,0 +1,365 @@
+import "./page-layer.css";
+import type { CheckIssue } from "./issues";
+import type { PageMap, PageMapNode, PageMapTarget } from "@universal-resume/pdf/page-map";
+import type { ResumeData } from "@universal-resume/schema/resume/data";
+import type { PDFDocumentProxy } from "pdfjs-dist";
+import type { CSSProperties } from "react";
+import { i18n } from "@lingui/core";
+import { t } from "@lingui/core/macro";
+import { Plural, Trans } from "@lingui/react/macro";
+import { getProposalState } from "@universal-resume/resume/proposals";
+import { Button } from "@universal-resume/ui/components/button";
+import { Icon } from "@universal-resume/ui/components/icon";
+import { useBreakpoint } from "@universal-resume/ui/hooks/use-breakpoint";
+import { cn } from "@universal-resume/utils/style";
+import { isSameSelection, useEditorStore } from "../store";
+import { findEntry } from "../write/model";
+import { scrollToIssue, useCheckActions } from "./actions";
+import { TermHighlights } from "./term-highlights";
+import { useCheck } from "./use-check";
+import { getPdfFindingMessage } from "@/features/ats-checker/messages";
+import { useResumeStore } from "@/features/resume/builder/draft";
+
+const toTarget = (node: PageMapNode): PageMapTarget => {
+	if (node.kind === "item") return { kind: "item", sectionId: node.sectionId, itemId: node.itemId };
+	if (node.kind === "section") return { kind: "section", sectionId: node.sectionId };
+	return { kind: "header" };
+};
+
+/** The first block drawn for a target, on whichever page it starts. */
+const findNode = (pageMap: PageMap, target: PageMapTarget) =>
+	pageMap.nodes.find((node) => isSameSelection(toTarget(node), target));
+
+/**
+ * A marker in the page margin, level with the top of a block: 30px left of it. A margin narrower than the marker
+ * (a scaled-down page) lets it hang past the page edge into the canvas gutter instead of covering the text; phones,
+ * whose gutter is narrow, keep it on the page. `stack` moves further markers on the same block down.
+ */
+type Box = Pick<PageMapNode, "x" | "y" | "width" | "height">;
+
+const marginStyle = (node: Box, page: { width: number; height: number }, stack = 0, onPage = false): CSSProperties => ({
+	left: `max(${onPage ? "4px" : "-26px"}, calc(${(node.x / page.width) * 100}% - 30px))`,
+	top: `calc(${(node.y / page.height) * 100}% - 3px + ${stack * 26}px)`,
+});
+
+/** Page-relative placement of a block, as percentages of its page. */
+function boxStyle(node: Box, page: { width: number; height: number }): CSSProperties {
+	return {
+		left: `${(node.x / page.width) * 100}%`,
+		top: `${(node.y / page.height) * 100}%`,
+		width: `${(node.width / page.width) * 100}%`,
+		height: `${(node.height / page.height) * 100}%`,
+	};
+}
+
+const text = (value: unknown): string =>
+	typeof value === "string"
+		? value
+		: typeof value === "object" && value
+			? Object.values(value).map(text).join(" ")
+			: "";
+
+/** The blocks whose text mentions a term: the header, the summary or entries. */
+function targetsMentioning(data: ResumeData, term: string): PageMapTarget[] {
+	const needle = term.toLowerCase();
+	const mentions = (value: unknown) => text(value).toLowerCase().includes(needle);
+	const targets: PageMapTarget[] = [];
+
+	if (mentions(data.basics)) targets.push({ kind: "header" });
+	if (mentions(data.summary.content)) targets.push({ kind: "section", sectionId: "summary" });
+
+	const sections = [
+		...Object.entries(data.sections).map(([id, section]) => ({ id, items: section.items as { id: string }[] })),
+		...data.customSections.map((section) => ({ id: section.id, items: section.items as { id: string }[] })),
+	];
+	for (const section of sections) {
+		for (const item of section.items) {
+			if (mentions(findEntry(data, section.id, item.id))) {
+				targets.push({ kind: "item", sectionId: section.id, itemId: item.id });
+			}
+		}
+	}
+
+	return targets;
+}
+
+type CheckPageLayerProps = {
+	pageIndex: number;
+	pageMap: PageMap | undefined;
+	document: PDFDocumentProxy;
+	pageScale: number;
+};
+
+/**
+ * Check's marks on one page: numbered warn pins with a wavy underline for open issues, numbered accent markers for
+ * proposed edits (while Writing is open), and a highlight on the entries that mention the picked job-match term.
+ */
+export function CheckPageLayer({ pageIndex, pageMap, document, pageScale }: CheckPageLayerProps) {
+	const check = useCheck();
+	const applications = useResumeStore((state) => state.proposalApplications);
+	const tab = useEditorStore((state) => state.checkTab);
+	const selected = useEditorStore((state) => state.checkIssue);
+	const highlightTerm = useEditorStore((state) => state.highlightTerm);
+	const proposals = useEditorStore((state) => state.proposals);
+	const exportCheck = useEditorStore((state) => state.exportCheck);
+	const breakpoint = useBreakpoint();
+	const onPage = breakpoint === "mobile";
+	const page = pageMap?.pages[pageIndex];
+
+	if (!check || !pageMap || !page || page.width <= 0 || page.height <= 0) return null;
+
+	const pickIssue = (issue: CheckIssue) => {
+		useEditorStore.setState({ checkIssue: issue.key, checkTab: "issues" });
+		// Tablets: the drawer opens on the issue. Phones stay on the page, where the issue bar steps through them.
+		if (breakpoint === "tablet") useEditorStore.setState({ panelHidden: false });
+		if (breakpoint !== "mobile") scrollToIssue(issue.key, "panel");
+	};
+
+	const perBlock = new Map<string, number>();
+	const pins =
+		tab !== "issues"
+			? []
+			: check.issues.flatMap((issue) => {
+					const node = issue.target ? findNode(pageMap, issue.target) : undefined;
+					if (!node || node.page !== pageIndex) return [];
+					const stack = perBlock.get(node.key) ?? 0;
+					perBlock.set(node.key, stack + 1);
+					return [{ issue, node, stack }];
+				});
+
+	const markers =
+		tab === "writing"
+			? proposals.flatMap((proposal, index) => {
+					if (getProposalState(check.data, proposal, applications) !== "pending") return [];
+					const target: PageMapTarget = proposal.target.itemId
+						? { kind: "item", sectionId: proposal.target.sectionId, itemId: proposal.target.itemId }
+						: { kind: "section", sectionId: proposal.target.sectionId };
+					const node = findNode(pageMap, target);
+					return node && node.page === pageIndex ? [{ number: index + 1, node }] : [];
+				})
+			: [];
+
+	// The deep check's findings, where it found them in the exported PDF: the same pages as the preview, as long as
+	// the resume hasn't changed since it ran.
+	const exportPins =
+		tab === "issues" && exportCheck?.data === check.data
+			? [...exportCheck.report.findings, ...exportCheck.report.tips].flatMap((finding, index) => {
+					const { page: pageNumber, box } = finding.evidence ?? {};
+					return box && pageNumber === pageIndex + 1 ? [{ finding, box, key: `${finding.code}:${index}` }] : [];
+				})
+			: [];
+
+	return (
+		<div data-slot="check-page-layer" className="pointer-events-none absolute inset-0">
+			{tab === "match" && highlightTerm && (
+				<TermHighlights document={document} pageIndex={pageIndex} scale={pageScale} term={highlightTerm} />
+			)}
+			{pins.map(({ issue, node, stack }) => {
+				const isSelected = selected === issue.key;
+				return (
+					<div key={issue.key}>
+						<div aria-hidden="true" className="absolute" style={boxStyle(node, page)}>
+							<div
+								className={cn(
+									"absolute -inset-x-1.5 -inset-y-[3px] rounded-md outline-[1.5px] transition-[outline-color] duration-quick outline-solid",
+									isSelected ? "outline-warn" : "outline-transparent",
+								)}
+							/>
+							{stack === 0 && <div className="wavy-underline absolute inset-x-0 -bottom-1 h-1" />}
+						</div>
+						<button
+							type="button"
+							data-issue-pin={issue.key}
+							aria-label={t`Issue ${i18n.number(issue.number)}: ${issue.title}`}
+							aria-pressed={isSelected}
+							onClick={() => pickIssue(issue)}
+							style={marginStyle(node, page, stack, onPage)}
+							className={cn(
+								"pointer-events-auto absolute grid size-5 place-items-center rounded-xs bg-warn-mark t-caption font-semibold text-warn-ink",
+								isSelected && "outline-2 outline-offset-1 outline-warn",
+							)}
+						>
+							{i18n.number(issue.number)}
+						</button>
+					</div>
+				);
+			})}
+
+			{exportPins.map(({ finding, box, key }) => (
+				<div key={key}>
+					<div
+						aria-hidden="true"
+						className="absolute -m-[3px] rounded-md border-[1.5px] border-dashed border-info-text p-[3px]"
+						style={boxStyle(box, page)}
+					/>
+					<button
+						type="button"
+						data-export-pin={finding.code}
+						aria-label={t`Exported PDF: ${getPdfFindingMessage(finding.code).title}`}
+						title={getPdfFindingMessage(finding.code).title}
+						onClick={() => useEditorStore.setState({ exportReportOpen: true })}
+						style={marginStyle(box, page, 0, onPage)}
+						className="pointer-events-auto absolute grid size-[22px] place-items-center rounded-sm border-2 border-paper bg-info-text text-bg shadow-e1"
+					>
+						<Icon name="file-pdf" size={13} />
+					</button>
+				</div>
+			))}
+
+			{markers.map(({ number, node }) => (
+				<span
+					key={`marker:${number}`}
+					aria-hidden="true"
+					className="absolute grid size-5 place-items-center rounded-xs bg-accent text-xs font-semibold text-on-accent"
+					style={marginStyle(node, page, 0, onPage)}
+				>
+					{i18n.number(number)}
+				</span>
+			))}
+		</div>
+	);
+}
+
+/** "What a person sees / What a parser reads", floating over the canvas in Check. Switching is instant. */
+export function PageViewToggle() {
+	const view = useEditorStore((state) => state.pageView);
+	const count = useEditorStore((state) => state.rendered.pageCount);
+	const tab = useEditorStore((state) => state.checkTab);
+	const check = useCheck();
+	const highlightTerm = useEditorStore((state) => state.highlightTerm);
+	const pageMap = useEditorStore((state) => state.rendered.pageMap);
+	const mentions =
+		check && highlightTerm
+			? targetsMentioning(check.data, highlightTerm).filter((target) =>
+					pageMap?.nodes.some((node) => isSameSelection(toTarget(node), target)),
+				).length
+			: 0;
+	const proposals = useEditorStore((state) => state.proposals);
+	const applications = useResumeStore((state) => state.proposalApplications);
+	const pending =
+		check && tab === "writing"
+			? proposals.filter((proposal) => getProposalState(check.data, proposal, applications) === "pending").length
+			: 0;
+	const writing = view === "page" && count === 1 && pending > 0;
+	return (
+		<>
+			{writing && (
+				<span
+					data-check-writing-caption
+					className="pointer-events-none absolute inset-x-0 top-3.5 text-center t-mono text-ink-3"
+				>
+					<Plural
+						value={pending}
+						one="# suggested rewrite on this page · nothing changes until you accept"
+						other="# suggested rewrites on this page · nothing changes until you accept"
+					/>
+				</span>
+			)}
+			{view === "parser" && (
+				<span className="pointer-events-none absolute inset-x-0 top-3.5 text-center t-mono text-ink-3">
+					<Trans>What a parser reads · page 1 of {i18n.number(Math.max(1, count))}</Trans>
+				</span>
+			)}
+
+			{tab === "match" && view === "page" && highlightTerm ? (
+				<span
+					data-check-page-toggle
+					className="absolute end-[calc(50%-310px)] top-[13px] t-small text-ink-2 max-sm:end-4"
+				>
+					<Trans>“{highlightTerm}”</Trans>
+					{" · "}
+					<Plural value={mentions} one="found in # place" other="found in # places" />
+				</span>
+			) : (
+				<Button
+					data-check-page-toggle
+					variant="ghost"
+					size="sm"
+					className={cn(
+						"absolute end-[calc(50%-310px)] top-3 z-10 h-5 gap-1.5 p-0 text-[13px]/5 text-accent-text max-sm:end-4",
+						view === "parser" && "end-[calc(50%-350px)]",
+						tab === "writing" && view === "page" && "top-10",
+					)}
+					onClick={() => useEditorStore.setState({ pageView: view === "page" ? "parser" : "page" })}
+				>
+					<Icon name={view === "page" ? "code" : "file-text"} size={16} />
+					{view === "page" ? <Trans>See what a parser reads</Trans> : <Trans>Back to the page</Trans>}
+				</Button>
+			)}
+		</>
+	);
+}
+
+/**
+ * Phones (B2): with an issue picked, the page shows "Issue n of m" with ‹ › to step through them, and the card's
+ * fix below, so fixing never needs the panel.
+ */
+export function IssueStepper() {
+	const check = useCheck();
+	const selected = useEditorStore((state) => state.checkIssue);
+	const { fix } = useCheckActions();
+
+	const issues = check?.issues ?? [];
+	const index = issues.findIndex((issue) => issue.key === selected);
+	const issue = issues[index];
+	if (!issue) return null;
+
+	const go = (step: number) => {
+		const next = issues[(index + step + issues.length) % issues.length];
+		if (!next) return;
+		useEditorStore.setState({ checkIssue: next.key });
+		scrollToIssue(next.key, "page");
+	};
+
+	return (
+		<>
+			<div className="absolute inset-x-3 top-3 z-10 flex h-11 items-center gap-1 rounded-xl bg-ink px-1 text-bg shadow-e3">
+				<button
+					type="button"
+					aria-label={t`Close`}
+					onClick={() => useEditorStore.setState({ checkIssue: null })}
+					className="grid size-9 place-items-center rounded-lg"
+				>
+					<Icon name="x" size={20} />
+				</button>
+				<span className="flex-1 text-center text-sm font-semibold">
+					<Trans>
+						Issue {i18n.number(issue.number)} of {i18n.number(issues.length)}
+					</Trans>
+				</span>
+				<button
+					type="button"
+					aria-label={t`Previous issue`}
+					onClick={() => go(-1)}
+					className="grid size-9 place-items-center rounded-lg"
+				>
+					<Icon name="caret-left" size={20} />
+				</button>
+				<button
+					type="button"
+					aria-label={t`Next issue`}
+					onClick={() => go(1)}
+					className="grid size-9 place-items-center rounded-lg"
+				>
+					<Icon name="caret-right" size={20} />
+				</button>
+			</div>
+
+			<section
+				aria-label={t`Issue ${i18n.number(issue.number)}`}
+				className="absolute inset-x-3 bottom-3 z-10 grid gap-2 rounded-xl border border-line bg-surface p-3.5 shadow-e3"
+			>
+				<strong className="text-[15px] font-semibold">{issue.title}</strong>
+				<p className="text-[13px] leading-[19px] text-ink-2">{issue.body}</p>
+				<Button size="sm" className="h-10 w-fit px-3.5 text-sm" onClick={() => fix(issue)}>
+					{issue.fix.kind === "apply" ? (
+						<Icon name={issue.fix.icon} size={18} />
+					) : (
+						<Icon name="pencil-simple" size={18} />
+					)}
+					{issue.fix.label}
+				</Button>
+			</section>
+		</>
+	);
+}

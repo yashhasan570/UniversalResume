@@ -1,0 +1,41 @@
+{
+	"name": "@universal-resume/tooling",
+	"version": "0.0.0",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"test": "vp test run --passWithNoTests",
+		"test:ci": "vp test run --reporter=default --reporter=github-actions --reporter=json --reporter=junit --outputFile.json=reports/vitest-results.json --outputFile.junit=reports/vitest-junit.xml --passWithNoTests",
+		"typecheck": "tsrs --noEmit",
+		"pdf:translations": "tsx locales/generate.ts",
+		"icons:pdf": "tsx icons/phosphor-pdf.ts",
+		"capture:build": "node capture/build.mjs"
+	},
+	"dependencies": {
+		"@universal-resume/email": "workspace:*",
+		"@universal-resume/pdf": "workspace:*",
+		"@universal-resume/schema": "workspace:*",
+		"@universal-resume/import": "workspace:*",
+		"@universal-resume/utils": "workspace:*",
+		"@universal-resume/fonts": "workspace:*"
+	},
+	"devDependencies": {
+		"@lingui/format-po": "^6.12.0",
+		"@phosphor-icons/react": "^2.1.10",
+		"@playwright/test": "^1.65.0",
+		"@universal-resume/config": "workspace:*",
+		"@universal-resume/resume": "workspace:*",
+		"@types/pg": "catalog:",
+		"@types/react": "catalog:",
+		"@types/react-dom": "catalog:",
+		"esbuild": "catalog:",
+		"pg": "catalog:",
+		"react": "19.3.1",
+		"react-dom": "19.3.1",
+		"tsrs": "catalog:",
+		"tsx": "^4.23.15",
+		"vite-plus": "catalog:",
+		"wrangler": "catalog:",
+		"fflate": "catalog:"
+	}
+}
