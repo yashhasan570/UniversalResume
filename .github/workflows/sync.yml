@@ -16,7 +16,7 @@ jobs:
         run: |
           git config user.name "yashhasan570"
           git config user.email "hasankhalid700570@gmail.com"
-          git clone --depth 1 https://github.com/UniversalPillai/Reactive-Resume /tmp/upstream
+          git clone --depth 1 https://github.com/AmruthPillai/Reactive-Resume /tmp/upstream
           rsync -a --delete --exclude=.git --exclude=.github --exclude=README.md --exclude=scripts /tmp/upstream/ ./
           rm -rf /tmp/upstream
       - name: Reapply rebrand
