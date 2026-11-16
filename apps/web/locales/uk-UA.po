@@ -2288,7 +2288,7 @@ msgstr "Числова дата читається по-різному в різ
 msgid "A page is rotated."
 msgstr "Сторінка повернута."
 
-#. Email footer. author: Universal Resume, linked
+#. Email footer. author: Universal Pillai, linked
 #: src/features/auth/email-text.ts
 msgid "A passion project by {author}."
 msgstr "Проєкт-захоплення від {author}."
@@ -15543,8 +15543,8 @@ msgid "Universal Resume {__APP_VERSION__} · MIT"
 msgstr "Universal Resume {__APP_VERSION__} · MIT"
 
 #: src/features/homepage/sections.tsx
-msgid "Universal Resume is open source under the MIT License. Universal Resume and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier."
-msgstr "Universal Resume — проєкт з відкритим кодом під ліцензією MIT. Його підтримують Universal Resume та спільнота контриб’юторів, а пожертви оплачують хостинг і розробку. Платного тарифу немає."
+msgid "Universal Resume is open source under the MIT License. Universal Pillai and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier."
+msgstr "Universal Resume — проєкт з відкритим кодом під ліцензією MIT. Його підтримують Universal Pillai та спільнота контриб’юторів, а пожертви оплачують хостинг і розробку. Платного тарифу немає."
 
 #: src/features/settings/preferences.tsx
 msgid "Universal Resume is translated by volunteers."

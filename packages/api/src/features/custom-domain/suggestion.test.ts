@@ -29,14 +29,14 @@ afterEach(() => {
 
 describe("suggestCvDomain", () => {
 	it("suggests the first of the account's names that is free and not premium, with its price", async () => {
-		state.user = { username: "universalresume", name: "Universal Resume" };
+		state.user = { username: "universalresume", name: "Universal Pillai" };
 		olacv({
 			"universalresume.cv": { available: true, premium: true, registration_fee: 67.5, renewal_fee: 10, currency: "USD" },
-			"universalresume.cv": { available: false, premium: false, registration_fee: 10, currency: "USD" },
-			"universal-resume.cv": { available: true, premium: false, registration_fee: 10, renewal_fee: 10, currency: "USD" },
+			"universalresumepillai.cv": { available: false, premium: false, registration_fee: 10, currency: "USD" },
+			"universalresume-pillai.cv": { available: true, premium: false, registration_fee: 10, renewal_fee: 10, currency: "USD" },
 		});
 		expect(await suggestCvDomain("u1")).toEqual({
-			domain: "universal-resume.cv",
+			domain: "universalresume-pillai.cv",
 			checked: true,
 			price: { amount: 10, renewal: 10, currency: "USD" },
 		});

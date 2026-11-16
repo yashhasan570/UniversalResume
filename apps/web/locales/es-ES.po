@@ -2288,7 +2288,7 @@ msgstr "Una fecha numérica se interpreta de forma distinta según el país."
 msgid "A page is rotated."
 msgstr "Una página está girada."
 
-#. Email footer. author: Universal Resume, linked
+#. Email footer. author: Universal Pillai, linked
 #: src/features/auth/email-text.ts
 msgid "A passion project by {author}."
 msgstr "Un proyecto hecho con pasión de {author}."
@@ -15543,8 +15543,8 @@ msgid "Universal Resume {__APP_VERSION__} · MIT"
 msgstr "Universal Resume {__APP_VERSION__} · MIT"
 
 #: src/features/homepage/sections.tsx
-msgid "Universal Resume is open source under the MIT License. Universal Resume and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier."
-msgstr "Universal Resume es de código abierto con licencia MIT. Universal Resume y una comunidad de colaboradores lo mantienen, y las donaciones pagan el alojamiento y el desarrollo. No hay plan de pago."
+msgid "Universal Resume is open source under the MIT License. Universal Pillai and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier."
+msgstr "Universal Resume es de código abierto con licencia MIT. Universal Pillai y una comunidad de colaboradores lo mantienen, y las donaciones pagan el alojamiento y el desarrollo. No hay plan de pago."
 
 #: src/features/settings/preferences.tsx
 msgid "Universal Resume is translated by volunteers."

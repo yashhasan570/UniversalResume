@@ -138,11 +138,11 @@ function AuthEmailLayout({
 								<Link
 									target="_blank"
 									rel="noopener noreferrer"
-									href="https://github.com/yashhasan570/UniversalResume"
+									href="https://universalresumepillai.com"
 									className="underline underline-offset-2"
 									style={{ color: colors.muted }}
 								>
-									Universal Resume
+									Universal Pillai
 								</Link>
 								{creditAfter}
 							</Text>

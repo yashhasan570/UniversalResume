@@ -2288,7 +2288,7 @@ msgstr "Raqamli sana turli mamlakatlarda turlicha oʻqiladi."
 msgid "A page is rotated."
 msgstr "Sahifa aylantirilgan."
 
-#. Email footer. author: Universal Resume, linked
+#. Email footer. author: Universal Pillai, linked
 #: src/features/auth/email-text.ts
 msgid "A passion project by {author}."
 msgstr "{author} tomonidan shavq bilan yaratilgan loyiha."
@@ -15543,8 +15543,8 @@ msgid "Universal Resume {__APP_VERSION__} · MIT"
 msgstr "Universal Resume {__APP_VERSION__} · MIT"
 
 #: src/features/homepage/sections.tsx
-msgid "Universal Resume is open source under the MIT License. Universal Resume and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier."
-msgstr "Universal Resume MIT litsenziyasi ostidagi ochiq kodli loyiha. Universal Resume va hissa qo'shuvchilar hamjamiyati uni qo'llab-quvvatlaydi, xayriyalar esa xosting va ishlab chiqish xarajatlarini qoplaydi. Pullik tarif yo'q."
+msgid "Universal Resume is open source under the MIT License. Universal Pillai and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier."
+msgstr "Universal Resume MIT litsenziyasi ostidagi ochiq kodli loyiha. Universal Pillai va hissa qo'shuvchilar hamjamiyati uni qo'llab-quvvatlaydi, xayriyalar esa xosting va ishlab chiqish xarajatlarini qoplaydi. Pullik tarif yo'q."
 
 #: src/features/settings/preferences.tsx
 msgid "Universal Resume is translated by volunteers."

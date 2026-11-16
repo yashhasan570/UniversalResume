@@ -2288,7 +2288,7 @@ msgstr "எண் வடிவ தேதி வெவ்வேறு நாட�
 msgid "A page is rotated."
 msgstr "ஒரு பக்கம் சுழற்றப்பட்டுள்ளது."
 
-#. Email footer. author: Universal Resume, linked
+#. Email footer. author: Universal Pillai, linked
 #: src/features/auth/email-text.ts
 msgid "A passion project by {author}."
 msgstr "{author} உருவாக்கிய ஒரு ஆர்வத் திட்டம்."
@@ -15543,8 +15543,8 @@ msgid "Universal Resume {__APP_VERSION__} · MIT"
 msgstr "Universal Resume {__APP_VERSION__} · MIT"
 
 #: src/features/homepage/sections.tsx
-msgid "Universal Resume is open source under the MIT License. Universal Resume and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier."
-msgstr "Universal Resume, MIT உரிமத்தின் கீழ் திறந்த மூலமாக உள்ளது. Universal Resume-யும் பங்களிப்பாளர்களின் சமூகமும் இதை இயக்குகின்றனர்; ஹோஸ்டிங் மற்றும் மேம்பாட்டுச் செலவுகளை நன்கொடைகள் ஈடுகட்டுகின்றன. கட்டணத் திட்டம் எதுவும் இல்லை."
+msgid "Universal Resume is open source under the MIT License. Universal Pillai and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier."
+msgstr "Universal Resume, MIT உரிமத்தின் கீழ் திறந்த மூலமாக உள்ளது. Universal Pillai-யும் பங்களிப்பாளர்களின் சமூகமும் இதை இயக்குகின்றனர்; ஹோஸ்டிங் மற்றும் மேம்பாட்டுச் செலவுகளை நன்கொடைகள் ஈடுகட்டுகின்றன. கட்டணத் திட்டம் எதுவும் இல்லை."
 
 #: src/features/settings/preferences.tsx
 msgid "Universal Resume is translated by volunteers."

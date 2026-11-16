@@ -52,7 +52,7 @@ const getColumns = (story: boolean): { id: string; title: string; links: FooterL
 			{ label: t`Translations`, href: "https://crowdin.com/project/universal-resume" },
 			{ label: t`Contact`, href: "https://t.me/johnconstantine570" },
 			{ label: "LinkedIn", href: "https://www.linkedin.com/company/universal-resume" },
-			{ label: "Universal Resume · X", href: "https://x.com/KingOKings" },
+			{ label: "Universal Pillai · X", href: "https://x.com/KingOKings" },
 			{ label: t`Report a bug`, href: `${githubUrl}/issues` },
 		],
 	},

@@ -341,7 +341,7 @@ export function Support() {
 					</Trans>
 				</h2>
 				<p className="max-w-[28em] font-display text-[clamp(17px,1.4vw,21px)] leading-normal text-pretty text-ink-2">
-					{t`Universal Resume is open source under the MIT License. Universal Resume and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier.`}
+					{t`Universal Resume is open source under the MIT License. Universal Pillai and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier.`}
 				</p>
 				<ul className="grid gap-2.5">
 					{doorways.map((doorway) => (
@@ -397,7 +397,7 @@ export function Support() {
 							</p>
 							<div className="mt-2.5 flex flex-col gap-1.5">
 								<a
-									href="https://github.com/sponsors/yashhasan570"
+									href="https://github.com/sponsors/UniversalPillai"
 									className={cn(
 										receiptButtonClass,
 										"bg-[oklch(0.22_0.01_95)] text-white hover:bg-[oklch(0.32_0.01_95)]",

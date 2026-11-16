@@ -58,11 +58,11 @@ FROM node:${NODE_VERSION}-slim AS runtime
 ARG APP_REVISION
 ENV APP_REVISION=${APP_REVISION}
 
-LABEL maintainer="yashhasan570"
+LABEL maintainer="universalresumepillai"
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.title="Universal Resume"
 LABEL org.opencontainers.image.description="A free and open-source resume builder."
-LABEL org.opencontainers.image.vendor="Universal Resume"
+LABEL org.opencontainers.image.vendor="Universal Pillai"
 LABEL org.opencontainers.image.url="https://universalresume.app"
 LABEL org.opencontainers.image.documentation="https://docs.universalresume.app"
 LABEL org.opencontainers.image.source="https://github.com/universal-resume/universal-resume"

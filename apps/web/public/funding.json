@@ -4,7 +4,7 @@
 	"entity": {
 		"type": "individual",
 		"role": "maintainer",
-		"name": "Universal Resume",
+		"name": "Universal Pillai",
 		"email": "universalresume@universalresume.app",
 		"description": "Software Engineer",
 		"webpageUrl": {
@@ -55,7 +55,7 @@
 				"guid": "github",
 				"type": "payment-provider",
 				"description": "GitHub Sponsors",
-				"address": "https://github.com/sponsors/yashhasan570"
+				"address": "https://github.com/sponsors/UniversalPillai"
 			},
 			{
 				"guid": "open-collective",

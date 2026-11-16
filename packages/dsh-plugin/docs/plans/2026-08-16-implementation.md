@@ -1081,7 +1081,7 @@ MIT
 
 - [ ] **Step 3: Add the MIT license**
 
-Create `LICENSE` with the standard MIT text, copyright `2026 Universal Resume`.
+Create `LICENSE` with the standard MIT text, copyright `2026 Universal Pillai`.
 
 - [ ] **Step 4: Verify the package contents before publishing**
 

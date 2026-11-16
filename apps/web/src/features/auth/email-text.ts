@@ -50,4 +50,4 @@ msg`Approve change`;
 msg`If you did not request this change, ignore this email and change your password. The address on the account will not change without your approval.`;
 msg`If the button does not work, copy and paste this link into your browser:`;
 msg`By the community, for the community.`;
-msg({ message: "A passion project by {author}.", comment: "Email footer. author: Universal Resume, linked" });
+msg({ message: "A passion project by {author}.", comment: "Email footer. author: Universal Pillai, linked" });

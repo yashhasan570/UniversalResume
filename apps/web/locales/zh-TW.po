@@ -2288,7 +2288,7 @@ msgstr "數字格式的日期在不同國家的讀法不同。"
 msgid "A page is rotated."
 msgstr "有一頁被旋轉了。"
 
-#. Email footer. author: Universal Resume, linked
+#. Email footer. author: Universal Pillai, linked
 #: src/features/auth/email-text.ts
 msgid "A passion project by {author}."
 msgstr "{author} 的熱情之作。"
@@ -15543,8 +15543,8 @@ msgid "Universal Resume {__APP_VERSION__} · MIT"
 msgstr "Universal Resume {__APP_VERSION__} · MIT"
 
 #: src/features/homepage/sections.tsx
-msgid "Universal Resume is open source under the MIT License. Universal Resume and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier."
-msgstr "Universal Resume 以 MIT 授權開源。Universal Resume 和貢獻者社群維持它的運作，捐款用於支付託管和開發費用。沒有付費方案。"
+msgid "Universal Resume is open source under the MIT License. Universal Pillai and a community of contributors keep it running, and donations pay for hosting and development. There’s no paid tier."
+msgstr "Universal Resume 以 MIT 授權開源。Universal Pillai 和貢獻者社群維持它的運作，捐款用於支付託管和開發費用。沒有付費方案。"
 
 #: src/features/settings/preferences.tsx
 msgid "Universal Resume is translated by volunteers."

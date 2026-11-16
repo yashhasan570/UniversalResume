@@ -131,7 +131,7 @@ export async function generateOpenApiSpec({ appUrl, version }: GenerateOpenApiSp
 			description:
 				"Universal Resume API. Mutations do not support Idempotency-Key. Do not automatically retry POST, PUT, PATCH or DELETE requests after a timeout: first read the resource to determine whether the operation succeeded. Existing enum values and response shapes are retained for compatibility.",
 			license: { name: "MIT", url: "https://github.com/universal-resume/universal-resume/blob/main/LICENSE" },
-			contact: { name: "Universal Resume", email: "universalresume@universalresume.app", url: "https://github.com/yashhasan570/UniversalResume" },
+			contact: { name: "Universal Pillai", email: "universalresume@universalresume.app", url: "https://universalresumepillai.com" },
 		},
 		servers: [{ url: `${appUrl}/api/openapi` }],
 		paths: {
