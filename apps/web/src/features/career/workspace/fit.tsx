@@ -14,6 +14,7 @@ import { IconButton } from "@universal-resume/ui/components/icon-button";
 import { Skeleton } from "@universal-resume/ui/components/skeleton";
 import { Textarea } from "@universal-resume/ui/components/textarea";
 import { toast } from "@universal-resume/ui/components/toast";
+import { generateId } from "@universal-resume/utils/string";
 import { cn } from "@universal-resume/utils/style";
 import { latest, useDefaultProvider, useGenerate, useSavedItems, useWorkspace } from "../hooks";
 import { useCareerTime, GenerateNotice, Working, workingSteps } from "../shared";
@@ -643,7 +644,7 @@ function EvidenceEditor({ requirement, onCancel, onSaved, onPropose }: EvidenceE
 				applicationId: null,
 				category: "experience",
 				text: text.trim(),
-				source: { kind: "manual", id: crypto.randomUUID(), quote: text.trim() },
+				source: { kind: "manual", id: generateId(), quote: text.trim() },
 			});
 			if (account !== getAccountGeneration()) return;
 			if (!fact) throw new Error("not saved");

@@ -26,6 +26,7 @@ import { Label } from "@universal-resume/ui/components/label";
 import { NativeSelect } from "@universal-resume/ui/components/native-select";
 import { SegmentedControl, SegmentedControlItem } from "@universal-resume/ui/components/segmented-control";
 import { Textarea } from "@universal-resume/ui/components/textarea";
+import { generateId } from "@universal-resume/utils/string";
 import { cn } from "@universal-resume/utils/style";
 import { CareerLoadError, CareerLoading } from "../load-state";
 import { CollapseRow, flash, useCareerTime, withQueryUndo } from "../shared";
@@ -468,7 +469,7 @@ function AddFact({ onAdded }: AddFactProps) {
 			applicationId: null,
 			text: value,
 			category,
-			source: { kind: "manual", id: crypto.randomUUID(), quote: value },
+			source: { kind: "manual", id: generateId(), quote: value },
 		});
 	};
 
